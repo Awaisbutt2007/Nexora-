@@ -1,0 +1,726 @@
+/* ===== Post-Google-login onboarding page ===== */
+.onboarding-page {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    radial-gradient(900px 600px at 82% 38%, rgba(146, 84, 255, 0.16), transparent 65%),
+    radial-gradient(700px 500px at 12% 80%, rgba(85, 216, 255, 0.12), transparent 60%),
+    #050611;
+  color: #e8e7f7;
+  animation: onboarding-in 0.5s ease both;
+}
+
+@keyframes onboarding-in {
+  from { opacity: 0; transform: scale(1.01); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.onboarding-page .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ===== Progress steps ===== */
+/* Pinned flush to the very top edge: the track runs full-bleed, the labels sit
+   under it. It is positioned with a z-index above .onboarding-visual (which is
+   also positioned), so the particle canvas can never paint over the steps. */
+.onboarding-progress {
+  position: relative;
+  z-index: 5;
+  flex: none;
+  padding: 0 0 20px;
+}
+
+.onboarding-track {
+  height: 4px;
+  border-radius: 0;
+  background: rgba(164, 174, 255, 0.14);
+  overflow: hidden;
+}
+
+.onboarding-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #72e2ff, #9254ff, #e25fe9);
+  box-shadow: 0 0 14px rgba(146, 84, 255, 0.65);
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.onboarding-steps {
+  display: flex;
+  gap: clamp(14px, 4vw, 42px);
+  list-style: none;
+  /* the line is edge to edge, but the labels keep the page's side inset */
+  margin: 14px clamp(24px, 7vw, 90px) 0;
+  padding: 0;
+}
+
+.onboarding-steps li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  color: rgba(160, 165, 193, 0.6);
+  transition: color 0.35s ease;
+}
+
+.onboarding-steps li b {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(164, 174, 255, 0.25);
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.35s ease;
+}
+
+.onboarding-steps li.current {
+  color: #dedcf0;
+}
+
+.onboarding-steps li.current b {
+  border-color: rgba(114, 226, 255, 0.7);
+  color: #72e2ff;
+  box-shadow: 0 0 12px rgba(114, 226, 255, 0.35);
+}
+
+.onboarding-steps li.done b {
+  background: linear-gradient(135deg, #55d8ff, #9254ff);
+  border-color: transparent;
+  color: #050611;
+}
+
+.onboarding-steps li.done {
+  color: #b9b6d8;
+}
+
+/* ===== Main split layout ===== */
+.onboarding-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  align-items: center;
+  gap: clamp(20px, 5vw, 70px);
+  padding: clamp(18px, 4vh, 48px) clamp(24px, 7vw, 90px) 6vh;
+  min-height: 0;
+  overflow-y: auto; /* the voice-picker stage is taller than the viewport on small screens */
+  scrollbar-width: none; /* Firefox: scroll works, bar hidden */
+}
+
+.onboarding-body::-webkit-scrollbar {
+  display: none; /* Chrome/Edge/Safari: hide the visible scrollbar track */
+}
+
+.onboarding-copy h1 {
+  position: relative;
+  margin: 0 0 46px; /* input + button sit lower so wrapped typing lines never touch them */
+  font-size: clamp(28px, 4.2vw, 46px);
+  line-height: 1.15;
+}
+
+/* Hidden full text keeps the heading at its final height from frame 1 */
+.type-ghost {
+  visibility: hidden;
+}
+
+/* Gradient lives on the overlay itself — background-clip:text on the parent
+   would not paint over an absolutely-positioned child's glyphs */
+.type-live {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, #ffffff 10%, #b9e6ff 40%, #c9a6ff 70%, #ff9ce9 95%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Blinking keyboard caret that follows the typed text */
+.type-caret {
+  display: inline-block;
+  width: 3px;
+  height: 0.95em;
+  margin-left: 5px;
+  vertical-align: -0.12em;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #eaf6ff, #9db4ff);
+  box-shadow: 0 0 10px rgba(160, 190, 255, 0.8);
+  animation: caret-blink 0.85s steps(1) infinite;
+}
+
+.type-caret.caret-done {
+  animation-duration: 1.3s;
+}
+
+@keyframes caret-blink {
+  50% { opacity: 0; }
+}
+
+.onboarding-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 520px;
+}
+
+.onboarding-form input {
+  width: 100%;
+  padding: 14px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(164, 174, 255, 0.22);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f0eeff;
+  font-size: 15.5px;
+  outline: none;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.onboarding-form input::placeholder {
+  color: rgba(160, 165, 193, 0.55);
+}
+
+.onboarding-form input:focus {
+  border-color: rgba(114, 226, 255, 0.65);
+  box-shadow: 0 0 0 4px rgba(114, 226, 255, 0.12), 0 0 18px rgba(114, 226, 255, 0.18);
+}
+
+/* Every footer row in the wizard — the input row, the voice/face footers and
+   the reveal actions: Back on the far LEFT, the next action on the far RIGHT.
+   The DOM order matches (back button first) so tab order reads left to right. */
+.form-actions,
+.voice-footer,
+.reveal-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+/* The push lives on the BUTTONS (.onboarding-continue gets margin-left:auto and
+   .voice-back gets margin-right:auto) rather than on justify-content, so even a
+   narrow screen that wraps them onto two lines still lands the next action on
+   the RIGHT edge. The name stage has no Back at all — a lone Continue is pushed
+   right by the same rule. */
+
+.onboarding-continue {
+  /* owns the right edge of every footer row */
+  margin-left: auto;
+  padding: 14px 30px;
+  border-radius: 14px;
+  border: none;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #f3f1ff;
+  background: linear-gradient(120deg, #3f8fff, #9254ff 55%, #e25fe9);
+  background-size: 160% 100%;
+  cursor: pointer;
+  transition: opacity 0.3s ease, transform 0.25s ease, box-shadow 0.3s ease, filter 0.3s ease;
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+
+.onboarding-continue:disabled {
+  cursor: not-allowed;
+}
+
+.onboarding-continue:not(:disabled) {
+  opacity: 1;
+  filter: none;
+  box-shadow: 0 10px 28px rgba(146, 84, 255, 0.38);
+  animation: continue-glow 2.4s ease-in-out infinite;
+}
+
+.onboarding-continue:not(:disabled):hover {
+  transform: translateY(-2px);
+}
+
+@keyframes continue-glow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+.onboarding-error {
+  margin: 14px 0 0;
+  color: #ff8aa0;
+  font-size: 13px;
+}
+
+/* ===== Right-side nano particle visual ===== */
+.onboarding-visual {
+  position: relative;
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  width: min(46vw, 460px);
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.nano-particles {
+  width: 100%;
+  aspect-ratio: 1;
+  filter: drop-shadow(0 0 40px rgba(200, 208, 224, 0.35));
+}
+
+.nano-particles canvas {
+  display: block;
+}
+
+/* ===== Stage 3: voice & persona picker ===== */
+.voice-block {
+  max-width: 560px;
+}
+
+.voice-gender-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.voice-gender-toggle button {
+  padding: 12px 0;
+  border-radius: 10px;
+  border: 1px solid rgba(164, 174, 255, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  color: #a0a5c1;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.voice-gender-toggle button:hover {
+  color: #dedcf0;
+  border-color: rgba(164, 174, 255, 0.45);
+}
+
+.voice-gender-toggle button.selected {
+  color: #9fe8ff;
+  border-color: rgba(114, 226, 255, 0.65);
+  background: rgba(114, 226, 255, 0.08);
+  box-shadow: 0 0 16px rgba(114, 226, 255, 0.18) inset;
+}
+
+.voice-sub {
+  margin: 0 0 10px;
+  color: #a0a5c1;
+  font-size: 13.5px;
+}
+
+/* ===== Browse device voices ===== */
+.browse-voices-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.browse-voices {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 18px;
+  border-radius: 12px;
+  border: 1px dashed rgba(114, 226, 255, 0.45);
+  background: rgba(114, 226, 255, 0.06);
+  color: #9fe8ff;
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.browse-voices:hover {
+  background: rgba(114, 226, 255, 0.13);
+  border-color: rgba(114, 226, 255, 0.75);
+  transform: translateY(-1px);
+}
+
+.browse-voices span {
+  font-size: 15px;
+}
+
+.name-voice-box {
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(164, 174, 255, 0.25);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.name-voice-box p {
+  margin: 0 0 12px;
+  color: #dedcf0;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.name-voice-box input {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(164, 174, 255, 0.22);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f0eeff;
+  font-size: 14.5px;
+  outline: none;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.name-voice-box input:focus {
+  border-color: rgba(114, 226, 255, 0.65);
+  box-shadow: 0 0 0 4px rgba(114, 226, 255, 0.12);
+}
+
+/* Live waveform that replaces the play icon while a voice plays */
+.wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 14px;
+}
+
+.wave i {
+  width: 2.5px;
+  height: 100%;
+  border-radius: 2px;
+  background: #9fe8ff;
+  transform-origin: center;
+  transform: scaleY(0.3);
+  box-shadow: 0 0 6px rgba(114, 226, 255, 0.65);
+}
+
+.char-play.playing {
+  border-color: rgba(114, 226, 255, 0.85);
+  box-shadow: 0 0 14px rgba(114, 226, 255, 0.4);
+  background: rgba(114, 226, 255, 0.08);
+}
+
+.char-list {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(164, 174, 255, 0.14);
+}
+
+.char-list li {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(96px, auto) 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  border-bottom: 1px solid rgba(164, 174, 255, 0.09);
+  transition: background 0.25s ease;
+}
+
+.char-list li:last-child {
+  border-bottom: none;
+}
+
+.char-list li:hover {
+  background: rgba(114, 226, 255, 0.05);
+}
+
+.char-list li.picked {
+  background: rgba(114, 226, 255, 0.09);
+  box-shadow: inset 3px 0 0 #72e2ff;
+}
+
+.char-list strong {
+  color: #f0eeff;
+  font-size: 14.5px;
+}
+
+.char-list li > span {
+  color: #8f94b3;
+  font-size: 12.5px;
+}
+
+.char-play {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(164, 174, 255, 0.35);
+  background: transparent;
+  color: #cfd8ff;
+  font-size: 11px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all 0.25s ease;
+}
+
+.char-play:hover {
+  border-color: rgba(114, 226, 255, 0.8);
+  color: #72e2ff;
+  box-shadow: 0 0 14px rgba(114, 226, 255, 0.35);
+  transform: scale(1.07);
+}
+
+/* Custom (device) voice row: name · source · [transcribe][play] + a words line */
+.char-list li.custom-voice {
+  grid-template-columns: minmax(96px, auto) 1fr auto;
+  row-gap: 8px;
+}
+
+/* Scanned words sit where the built-in voices show their description */
+.char-list li .voice-meta {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #a8e9ff;
+}
+
+.voice-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.transcribe-btn {
+  border: 1px solid rgba(164, 174, 255, 0.35);
+  background: rgba(146, 84, 255, 0.1);
+  color: #d7d2ff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 7px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.25s ease;
+}
+
+.transcribe-btn:hover {
+  border-color: rgba(146, 84, 255, 0.8);
+  box-shadow: 0 0 14px rgba(146, 84, 255, 0.35);
+}
+
+.transcribe-btn.listening {
+  border-color: rgba(226, 95, 233, 0.85);
+  color: #ff9df0;
+  background: rgba(226, 95, 233, 0.12);
+  animation: transcribe-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes transcribe-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(226, 95, 233, 0.0); }
+  50% { box-shadow: 0 0 16px rgba(226, 95, 233, 0.5); }
+}
+
+.voice-words {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #cfd4f2;
+  background: rgba(114, 226, 255, 0.06);
+  border: 1px dashed rgba(114, 226, 255, 0.28);
+}
+
+.voice-words.error {
+  color: #ffb4c4;
+  background: rgba(255, 90, 120, 0.08);
+  border-color: rgba(255, 90, 120, 0.4);
+}
+
+.voice-words.listening {
+  color: #ff9df0;
+  border-color: rgba(226, 95, 233, 0.4);
+}
+
+.voice-back {
+  /* owns the left edge: absorbs the free space after it */
+  margin-right: auto;
+  padding: 12px 22px;
+  border-radius: 10px;
+  border: 1px dashed rgba(164, 174, 255, 0.3);
+  background: transparent;
+  color: #a0a5c1;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.voice-back:hover {
+  color: #dedcf0;
+  border-color: rgba(164, 174, 255, 0.6);
+}
+
+/* ===== Stage 4: face picker ===== */
+.face-block {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.face-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.face-controls .face-upload,
+.face-controls .face-default {
+  width: 100%;
+  max-width: 340px;
+  justify-content: center;
+}
+
+.face-upload,
+.face-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 20px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.face-upload {
+  border: 1px dashed rgba(114, 226, 255, 0.55);
+  background: rgba(114, 226, 255, 0.06);
+  color: #bfefff;
+}
+
+.face-upload:hover {
+  border-color: rgba(114, 226, 255, 0.9);
+  box-shadow: 0 0 16px rgba(114, 226, 255, 0.3);
+}
+
+.face-default {
+  border: 1px solid rgba(164, 174, 255, 0.3);
+  background: rgba(255, 255, 255, 0.02);
+  color: #c3c7e6;
+}
+
+.face-default:hover {
+  border-color: rgba(164, 174, 255, 0.6);
+  color: #dedcf0;
+}
+
+.face-upload.active,
+.face-default.active {
+  border-style: solid;
+  border-color: rgba(146, 84, 255, 0.85);
+  background: rgba(146, 84, 255, 0.14);
+  color: #efe6ff;
+  box-shadow: 0 0 16px rgba(146, 84, 255, 0.35);
+}
+
+/* Round DP of the uploaded photo, centred above the text */
+.face-dp {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.face-dp-img {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  border: 1px solid rgba(114, 226, 255, 0.55);
+  box-shadow: 0 0 22px rgba(114, 226, 255, 0.3), 0 0 44px rgba(146, 84, 255, 0.22);
+  background-repeat: no-repeat;
+  animation: face-dp-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes face-dp-in {
+  from { opacity: 0; transform: scale(0.7); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ===== Stage 5: centered reveal + spoken intro ===== */
+.onboarding-body.reveal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: clamp(10px, 3vh, 30px);
+}
+
+.onboarding-body.reveal .onboarding-visual {
+  order: -1;
+  /* 46vh only bites on short windows, where the centered stack would otherwise
+     overflow upward and get clipped right against the pinned step labels */
+  width: min(66vw, 480px, 46vh);
+}
+
+.onboarding-body.reveal .onboarding-copy {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.onboarding-body.reveal .onboarding-copy h1 {
+  margin-bottom: 22px;
+}
+
+.reveal-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  /* the row needs a real width to spread across, otherwise it shrinks to its
+     two buttons and space-between has no free space to distribute */
+  width: 100%;
+  max-width: 560px;
+}
+
+@media (max-width: 900px) {
+  .onboarding-body {
+    grid-template-columns: 1fr;
+    align-content: center;
+    overflow-y: auto;
+  }
+
+  .onboarding-visual {
+    width: min(76vw, 340px);
+    order: -1;
+  }
+
+  .onboarding-steps span {
+    display: none;
+  }
+
+  .onboarding-steps li {
+    gap: 0;
+  }
+}

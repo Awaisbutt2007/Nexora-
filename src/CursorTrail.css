@@ -1,0 +1,28 @@
+/* ==========================================================================
+   Nexora Interactive Glowing Mouse Particle Trail
+   ========================================================================== */
+
+.custom-cursor-container {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 999999;
+  overflow: hidden;
+}
+
+.custom-cursor-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 999998;
+}
+
+/* Disable on touch devices */
+@media (hover: none) and (pointer: coarse) {
+  .custom-cursor-container,
+  .custom-cursor-canvas {
+    display: none !important;
+  }
+}

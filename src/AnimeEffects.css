@@ -1,0 +1,97 @@
+/* ==========================================================================
+   3D Kinetic Text & Perspective Scroll Animations (Anime.js & LeadLyze style)
+   ========================================================================== */
+
+/* 3D Perspective Context */
+.anime-3d-scene {
+  perspective: 1200px;
+  transform-style: preserve-3d;
+}
+
+/* Word wrappers for 3D kinetic text reveals */
+.anime-3d-word-wrapper {
+  display: inline-block;
+  overflow: visible;
+  perspective: 1000px;
+  vertical-align: baseline;
+  transform-style: preserve-3d;
+}
+
+.anime-3d-word {
+  display: inline-block;
+  transform-origin: 50% 100% -20px;
+  transform-style: preserve-3d;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  opacity: 0;
+  transform: perspective(800px) rotateX(-75deg) translateY(45px) translateZ(-30px);
+}
+
+/* Fallback visible state */
+.anime-3d-word.is-revealed {
+  opacity: 1;
+  transform: perspective(800px) rotateX(0deg) translateY(0px) translateZ(0px);
+}
+
+/* 3D Kinetic Card Entrance Initial States */
+.anime-3d-card {
+  perspective: 1200px;
+  transform-style: preserve-3d;
+  will-change: transform, opacity, box-shadow;
+  transition: box-shadow 0.35s ease;
+}
+
+/* Glowing text highlight when 3D rotating */
+.anime-3d-word-wrapper span {
+  display: inline-block;
+}
+
+/* Ambient 3D floating animation for badges and highlights */
+@keyframes float3D {
+  0% {
+    transform: perspective(800px) translateZ(0px) translateY(0px) rotateX(0deg);
+  }
+
+  50% {
+    transform: perspective(800px) translateZ(16px) translateY(-5px) rotateX(3deg);
+  }
+
+  100% {
+    transform: perspective(800px) translateZ(0px) translateY(0px) rotateX(0deg);
+  }
+}
+
+.assistant-pill {
+  animation: float3D 5s ease-in-out infinite;
+  transform-style: preserve-3d;
+}
+
+/* 3D Tilt Shine Overlay on Cards */
+.card-shine-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(255, 255, 255, 0.08), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  z-index: 2;
+}
+
+.feature-card:hover .card-shine-overlay,
+.testimonial-card:hover .card-shine-overlay,
+.plan-card:hover .card-shine-overlay,
+.showcase-mockup:hover .card-shine-overlay {
+  opacity: 1;
+}
+
+/* Interactive Card 3D Depth */
+.feature-card,
+.testimonial-card,
+.plan-card,
+.showcase-tool,
+.showcase-mockup {
+  position: relative;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
