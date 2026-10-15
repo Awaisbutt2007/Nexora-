@@ -7,16 +7,34 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Environment variables and secrets (root + any dir). Keep sanitized examples.
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Local databases, backups and WAL/SHM sidecars (personal data — never commit)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+
+# Private uploads, recordings and voiceprints (backend/uploads/ + any root copy)
+uploads/
+recordings/
+voiceprints/
+
 node_modules
 dist
 dist-ssr
+coverage
 *.local
-
-# Backend
-backend/.env
-backend/data/*.db
-backend/data/*.db-*
-backend/uploads/
 
 # Editor directories and files
 .vscode/*

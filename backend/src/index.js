@@ -8,6 +8,7 @@ import authRoutes from './routes/auth.js'
 import chatRoutes from './routes/chat.js'
 import conversationRoutes from './routes/conversations.js'
 import memoryRoutes from './routes/memory.js'
+import realtimeRoutes from './routes/realtime.js'
 import toolsRoutes from './routes/tools.js'
 import userRoutes from './routes/user.js'
 import voiceRoutes from './routes/voice.js'
@@ -16,6 +17,10 @@ fs.mkdirSync(config.uploadsDir, { recursive: true })
 getDb()
 
 const app = express()
+
+/* Behind a reverse proxy, trust the first hop so req.ip (used by the auth rate
+   limiter) is the real client, not the load balancer. Off by default in local dev. */
+app.set('trust proxy', config.trustProxy ? 1 : false)
 
 app.use(
   cors({
@@ -26,6 +31,19 @@ app.use(
 )
 app.use(express.json({ limit: '2mb' }))
 
+/* Baseline security headers. This is a JSON API (no HTML is served or framed),
+   so a small, dependency-free set is enough and never blocks the SSE stream. */
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none')
+  if (config.nodeEnv === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+  next()
+})
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -33,6 +51,8 @@ app.get('/health', (_req, res) => {
     time: new Date().toISOString(),
     ai: config.openaiApiKey ? 'openai' : 'mock',
     model: config.openaiModel,
+    voice: config.openaiApiKey ? config.voiceProvider : 'unavailable (set OPENAI_API_KEY)',
+    voiceModel: config.voiceRealtimeModel,
   })
 })
 
@@ -49,6 +69,7 @@ app.get('/', (_req, res) => {
       tools: 'GET /api/tools  |  POST /api/tools/:toolId/run',
       user: 'GET /api/user/profile  |  POST /api/user/upgrade',
       voice: 'POST /api/voice/enroll  |  POST /api/voice/verify  |  GET|DELETE /api/voice/prints',
+      realtime: 'POST /api/voice/realtime/token  |  POST /api/voice/realtime/turn',
     },
   })
 })
@@ -59,6 +80,7 @@ app.use('/api/conversations', conversationRoutes)
 app.use('/api/memory', memoryRoutes)
 app.use('/api/tools', toolsRoutes)
 app.use('/api/user', userRoutes)
+app.use('/api/voice/realtime', realtimeRoutes)
 app.use('/api/voice', voiceRoutes)
 
 app.use(notFound)

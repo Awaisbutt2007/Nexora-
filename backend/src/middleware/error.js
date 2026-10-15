@@ -3,6 +3,8 @@ export function notFound(_req, res) {
 }
 
 export function errorHandler(err, _req, res, _next) {
+  /* Full detail stays in the server log; the client never gets an internal
+     5xx message in production (it can leak paths, deps or provider text). */
   console.error('[nexora]', err)
 
   if (err?.name === 'ZodError') {
@@ -16,9 +18,10 @@ export function errorHandler(err, _req, res, _next) {
   }
 
   const status = err.status || err.statusCode || 500
+  const exposeMessage = status < 500 || process.env.NODE_ENV !== 'production'
   res.status(status).json({
     error: {
-      message: err.message || 'Internal server error',
+      message: exposeMessage ? err.message || 'Request failed' : 'Internal server error',
       type: err.type || 'server_error',
     },
   })

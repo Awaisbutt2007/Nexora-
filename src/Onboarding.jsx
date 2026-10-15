@@ -182,6 +182,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
         voiceGender,
         characterId: character?.id || null,
         characterName: character?.name || null,
+        characterDesc: character?.desc || null,
         faceChoice,
         facePhotoName,
       }))

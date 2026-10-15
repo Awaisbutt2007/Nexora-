@@ -1,0 +1,50 @@
+import { config } from '../config.js'
+
+/* Dependency-free sliding-window brute-force guard for the auth endpoints.
+   Mirrors the voice limiter (services/realtime.js) so the app gains protection
+   without a new package. Two independent buckets are enforced:
+
+     - per email+IP  (authRateLimit)     → stops password spraying one account
+     - per IP        (authIpRateLimit)   → stops one host stuffing many accounts
+
+   State is in-memory and clears on restart — acceptable for a single instance.
+   Multi-instance deployments should front this with a shared store (Redis). */
+
+const buckets = new Map()
+
+function takeSlot(id, limit, windowMs) {
+  const now = Date.now()
+  const hits = (buckets.get(id) || []).filter((t) => now - t < windowMs)
+  const blocked = hits.length >= limit
+  hits.push(now)
+  buckets.set(id, hits)
+  return !blocked
+}
+
+export function authLimiter(req, res, next) {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown'
+  const email = String(req.body?.email || '').toLowerCase() || 'no-email'
+  const windowMs = config.authRateWindowMs
+
+  const accountOk = takeSlot(`auth:acct:${email}|${ip}`, config.authRateLimit, windowMs)
+  const ipOk = takeSlot(`auth:ip:${ip}`, config.authIpRateLimit, windowMs)
+
+  if (!accountOk || !ipOk) {
+    res.setHeader('Retry-After', Math.ceil(windowMs / 1000))
+    return res.status(429).json({
+      error: { message: 'Too many attempts — please wait a few minutes before trying again.', type: 'rate_limited' },
+    })
+  }
+  next()
+}
+
+/* Light janitor: drop buckets whose newest hit already aged out of the window,
+   so long-lived processes don't accumulate keys forever. */
+setInterval(() => {
+  const cutoff = Date.now() - config.authRateWindowMs
+  for (const [id, hits] of buckets) {
+    const live = hits.filter((t) => t > cutoff)
+    if (live.length === 0) buckets.delete(id)
+    else buckets.set(id, live)
+  }
+}, 15 * 60 * 1000).unref()

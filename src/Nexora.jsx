@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import './Nexora.css'
 import './typography.css'
 import SignIn from './SignIn.jsx'
@@ -6,8 +6,14 @@ import CursorTrail from './CursorTrail.jsx'
 import AnimeEffects from './AnimeEffects.jsx'
 import {
   clearSession,
+  deleteConversation,
+  deleteMemory,
+  getConversation,
+  listConversations,
+  listMemories,
   loadSession,
   me,
+  saveMemory,
   saveSession,
   streamChat,
   upgradePlan,
@@ -15,9 +21,55 @@ import {
 
 const ThreeHero = lazy(() => import('./ThreeHero.jsx'))
 const Onboarding = lazy(() => import('./Onboarding.jsx'))
+const VoiceCall = lazy(() => import('./VoiceCall.jsx'))
 
 /* Flag kept while a new (Google or sign-up) user still has to finish the "what should I call you" step */
 const ONBOARDING_KEY = 'nexora_onboarding_pending'
+
+/* Voice-call prefs live locally (provider voice + language); the persona name
+   comes from the onboarding wizard so Aira answers to the name the user gave. */
+const VOICE_PREFS_KEY = 'nexora_voice_prefs'
+const ONBOARDING_PROGRESS_KEY = 'nexora_onboarding_progress'
+
+/* OpenAI Realtime built-in voices (docs-verified list) */
+const VOICE_OPTIONS = [
+  ['marin', 'Marin', 'warm · natural female — recommended for Aira'],
+  ['shimmer', 'Shimmer', 'soft · expressive female'],
+  ['ballad', 'Ballad', 'light · melodic female'],
+  ['coral', 'Coral', 'breathy · friendly'],
+  ['sage', 'Sage', 'grounded · steady'],
+  ['verse', 'Verse', 'crisp · composed'],
+  ['alloy', 'Alloy', 'neutral · balanced'],
+  ['echo', 'Echo', 'easy-going · warm'],
+  ['ash', 'Ash', 'friendly · even'],
+  ['cedar', 'Cedar', 'firm · male-leaning'],
+]
+const VOICE_LANGUAGES = [['auto', 'Auto — mix freely (English + Urdu + Roman Urdu)'], ['en', 'English first'], ['ur', 'Urdu first']]
+
+function loadVoicePrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(VOICE_PREFS_KEY) || '{}')
+    let aiName = 'Aira'
+    let persona = ''
+    try {
+      const ob = JSON.parse(localStorage.getItem(ONBOARDING_PROGRESS_KEY) || '{}')
+      if (ob.aiName) aiName = ob.aiName
+      if (ob.characterName) {
+        persona = ob.characterDesc ? `${ob.characterName} — ${ob.characterDesc}` : ob.characterName
+      }
+    } catch { /* no wizard data */ }
+    return {
+      voice: VOICE_OPTIONS.some(([id]) => id === saved.voice) ? saved.voice : 'marin',
+      language: VOICE_LANGUAGES.some(([id]) => id === saved.language) ? saved.language : 'auto',
+      assistantName: aiName,
+      /* Persona the user picked at onboarding; sent to /token so Aira can weave
+         it into her system instructions. Style only — honesty rules still apply. */
+      persona,
+    }
+  } catch {
+    return { voice: 'marin', language: 'auto', assistantName: 'Aira', persona: '' }
+  }
+}
 
 /* Landing nav in the order the LINKS appear. This is deliberately not the order
    of the sections in the DOM (Showcase sits before Features, About before Plans),
@@ -30,7 +82,7 @@ function initialNavHash() {
   return NAV_SECTIONS.some(([hash]) => hash === window.location.hash) ? window.location.hash : '#home'
 }
 
-const navItems = [['Home', '⌂'], ['Chat', '◌'], ['Tools', '▦'], ['Memory', '◈'], ['Settings', '⚙']]
+const navItems = [['Home', '⌂'], ['Chat', '◌'], ['History', '⧗'], ['Tools', '▦'], ['Memory', '◈'], ['Settings', '⚙']]
 const tools = [
   ['▧', 'Image Generator', 'Create striking images from a simple prompt.', 'violet'],
   ['⌘', 'Code Assistant', 'Write, debug, and explain code with context.', 'blue'],
@@ -509,6 +561,20 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   const [drawerConversationId, setDrawerConversationId] = useState(null)
   const drawerEndRef = useRef(null)
 
+  /* Live voice calls + local voice preferences */
+  const [voiceOpen, setVoiceOpen] = useState(false)
+  const [voicePrefs, setVoicePrefs] = useState(() => loadVoicePrefs())
+
+  /* Memory manager (review / edit / delete what Aira remembers) */
+  const [memories, setMemories] = useState([])
+  const [memLoading, setMemLoading] = useState(false)
+  const [memBusy, setMemBusy] = useState(false)
+  const [memDraft, setMemDraft] = useState({ key: '', value: '', editingId: null })
+
+  /* Saved conversations (text + voice share one history — same `conversations` table) */
+  const [conversations, setConversations] = useState([])
+  const [convLoading, setConvLoading] = useState(false)
+
   const userName = userProfile?.name || 'Guest'
   const userEmail = userProfile?.email || 'Sign in to sync'
   const userInitial = userName.charAt(0).toUpperCase()
@@ -567,6 +633,89 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     setMessages([])
     setActiveView('Chat')
     setNotice('New chat ready.')
+  }
+
+  function persistVoicePrefs(next) {
+    setVoicePrefs(next)
+    try { localStorage.setItem(VOICE_PREFS_KEY, JSON.stringify({ voice: next.voice, language: next.language })) } catch { /* private mode */ }
+  }
+
+  const refreshMemories = useCallback(() => {
+    if (!isLoggedIn || !authToken) return
+    setMemLoading(true)
+    listMemories(authToken)
+      .then((r) => setMemories(r.data || []))
+      .catch(() => setNotice('Could not load memories — is the backend running on :8787?'))
+      .finally(() => setMemLoading(false))
+  }, [isLoggedIn, authToken])
+
+  useEffect(() => {
+    if (activeView !== 'Memory' || !isLoggedIn || !authToken) return undefined
+    /* defer one tick: the fetch (and its loading state) starts outside the effect body */
+    const id = setTimeout(refreshMemories, 0)
+    return () => clearTimeout(id)
+  }, [activeView, isLoggedIn, authToken, refreshMemories])
+
+  const refreshConversations = useCallback(() => {
+    if (!isLoggedIn || !authToken) return
+    setConvLoading(true)
+    listConversations(authToken)
+      .then((r) => setConversations(r.data || []))
+      .catch(() => setNotice('Could not load history — is the backend running on :8787?'))
+      .finally(() => setConvLoading(false))
+  }, [isLoggedIn, authToken])
+
+  useEffect(() => {
+    if (activeView !== 'History' || !isLoggedIn || !authToken) return undefined
+    const id = setTimeout(refreshConversations, 0)
+    return () => clearTimeout(id)
+  }, [activeView, isLoggedIn, authToken, refreshConversations])
+
+  /* Open a saved thread in the main chat panel — voice and text share the same shape */
+  function openConversation(id) {
+    getConversation(authToken, id)
+      .then((convo) => {
+        setConversationId(convo.id)
+        setMessages((convo.messages || []).map((m) => ({ id: m.id, role: m.role, content: m.content })))
+        setActiveView('Chat')
+        setNotice(`Opened “${convo.title}”.`)
+      })
+      .catch((err) => setNotice(err.message || 'Could not open that conversation.'))
+  }
+
+  function removeConversation(id) {
+    deleteConversation(authToken, id)
+      .then(() => {
+        setConversations((prev) => prev.filter((c) => c.id !== id))
+        /* if the deleted thread is the one currently loaded, clear the workspace */
+        setConversationId((current) => (current === id ? null : current))
+        setMessages((current) => (id === conversationId ? [] : current))
+        setNotice('Conversation deleted.')
+      })
+      .catch((err) => setNotice(err.message || 'Could not delete conversation.'))
+  }
+
+  function submitMemory(event) {
+    event.preventDefault()
+    if (memBusy || !memDraft.key.trim() || !memDraft.value.trim()) return
+    setMemBusy(true)
+    saveMemory(authToken, { key: memDraft.key.trim(), value: memDraft.value.trim(), source: 'user' })
+      .then((saved) => {
+        setMemories((prev) => {
+          const rest = prev.filter((m) => m.id !== saved.id)
+          return [{ ...saved, source: 'user' }, ...rest]
+        })
+        setMemDraft({ key: '', value: '', editingId: null })
+        setNotice(memDraft.editingId ? 'Memory updated.' : 'Aira will remember this.')
+      })
+      .catch((err) => setNotice(err.message || 'Could not save memory.'))
+      .finally(() => setMemBusy(false))
+  }
+
+  function removeMemoryEntry(id) {
+    deleteMemory(authToken, id)
+      .then(() => setMemories((prev) => prev.filter((m) => m.id !== id)))
+      .catch((err) => setNotice(err.message || 'Could not delete memory.'))
   }
 
   async function sendPrompt(event) {
@@ -688,16 +837,30 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       <header className="workspace-topbar">
         <Brand compact />
         <div className="workspace-actions">
+          <button
+            className="header-voice-btn"
+            type="button"
+            title="Talk to Nexora out loud"
+            onClick={() => {
+              if (!isLoggedIn || !authToken) {
+                onLogin()
+                return
+              }
+              setVoiceOpen(true)
+            }}
+          >
+            <span aria-hidden="true">◉</span> Talk
+          </button>
           {!isPremium && (
             <button
               className="header-upgrade-btn"
               type="button"
               onClick={() => {
                 if (onUpgrade) onUpgrade()
-                setNotice('✦ Upgraded to Nexora Plus Pro! All advanced tools and unlimited credits unlocked.')
+                setNotice('✦ Demo: Pro plan unlocked locally. No payment provider is connected — nothing was actually charged.')
               }}
             >
-              <span>✦</span> Upgrade to Premium
+              <span>✦</span> Try Pro (demo)
             </button>
           )}
           <div className="account-anchor">
@@ -815,12 +978,60 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         {activeView === 'Tools' && <div className="workspace-page-panel">
           <div className="workspace-tool-grid">{tools.map(([icon, title, description, tint]) => <button className={`workspace-tool tint-${tint} ${selectedTool === title ? 'tool-highlighted' : ''}`} type="button" key={title} onClick={() => { if (setSelectedTool) setSelectedTool(title); setNotice(`${title} is ready to try.`) }}><span className="showcase-icon">{icon}</span><strong>{title}</strong><small>{description}</small><b>Open tool →</b></button>)}</div>
         </div>}
+        {activeView === 'History' && <section className="workspace-page-panel history-panel">
+          <div className="settings-icon">⧗</div>
+          <h2>Every chat, text and voice, in one place.</h2>
+          <p>Aira keeps spoken calls in the same thread list as your typed chats. Open one to continue where you left off, or delete it — the transcript goes with it.</p>
+          {!isLoggedIn ? <p className="history-empty">Sign in to see your saved conversations.</p> : <>
+            {convLoading && <p className="history-empty">Loading…</p>}
+            {!convLoading && conversations.length === 0 && <p className="history-empty">Nothing saved yet. Start a chat or a Talk call and it will show up here.</p>}
+            <ul className="history-list">{conversations.map((c) => <li key={c.id}>
+              <button type="button" className="history-open" onClick={() => openConversation(c.id)}>
+                <strong>{c.title}</strong>
+                <small>{new Date(c.updatedAt).toLocaleString()} · {c.model || 'chat'}</small>
+              </button>
+              <button type="button" className="history-del" aria-label={`Delete ${c.title}`} onClick={() => removeConversation(c.id)}>×</button>
+            </li>)}</ul>
+          </>}
+        </section>}
         {(activeView === 'Memory' || activeView === 'Settings') && <section className="workspace-page-panel settings-panel">
           <div className="settings-icon">{activeView === 'Memory' ? '◈' : '⚙'}</div>
           <h2>{activeView === 'Memory' ? 'A little context goes a long way.' : 'Your space, your way.'}</h2>
-          <p>{activeView === 'Memory' ? 'Your saved preferences and helpful details will appear here.' : 'Choose how Nexora looks and works for you.'}</p>
+          <p>{activeView === 'Memory' ? 'Everything Aira is allowed to remember lives here — review, edit or delete any of it.' : 'Choose how Aira sounds and which languages she answers in.'}</p>
+          {activeView === 'Settings' && <div className="settings-voice-grid">
+            <label className="settings-field"><span>Voice</span>
+              <select value={voicePrefs.voice} onChange={(event) => persistVoicePrefs({ ...voicePrefs, voice: event.target.value })}>
+                {VOICE_OPTIONS.map(([id, name, hint]) => <option key={id} value={id}>{name} — {hint}</option>)}
+              </select>
+            </label>
+            <label className="settings-field"><span>Language</span>
+              <select value={voicePrefs.language} onChange={(event) => persistVoicePrefs({ ...voicePrefs, language: event.target.value })}>
+                {VOICE_LANGUAGES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+              </select>
+            </label>
+            <p className="settings-note">Voice changes take effect on the next Talk call. Speech runs through the live provider — if the backend has no API key the call is refused, never faked.</p>
+          </div>}
+          {activeView === 'Memory' && <div className="memory-panel">
+            {isLoggedIn ? <>
+              <form className="memory-add" onSubmit={submitMemory}>
+                <input value={memDraft.key} onChange={(event) => setMemDraft((d) => ({ ...d, key: event.target.value }))} placeholder="Topic (e.g. Preferred language)" maxLength={80} />
+                <input value={memDraft.value} onChange={(event) => setMemDraft((d) => ({ ...d, value: event.target.value }))} placeholder="Detail (e.g. Reply in Roman Urdu)" maxLength={2000} />
+                <button className="button" type="submit" disabled={memBusy || !memDraft.key.trim() || !memDraft.value.trim()}>{memDraft.editingId ? 'Save' : 'Add'}</button>
+                {memDraft.editingId && <button className="button button-ghost" type="button" onClick={() => setMemDraft({ key: '', value: '', editingId: null })}>Cancel</button>}
+              </form>
+              {memLoading && <p className="memory-status">Loading memories…</p>}
+              {!memLoading && memories.length === 0 && <p className="memory-status">No memories yet. Add one above, or tell Aira during a Talk call — she only stores what you approve here.</p>}
+              <ul className="memory-list">{memories.map((m) => <li key={m.id}>
+                <div className="memory-text"><strong>{m.key}</strong><span>{m.value}</span></div>
+                <div className="memory-ops">
+                  <button type="button" onClick={() => setMemDraft({ key: m.key, value: m.value, editingId: m.id })}>Edit</button>
+                  <button type="button" className="memory-danger" onClick={() => removeMemoryEntry(m.id)}>Delete</button>
+                </div>
+              </li>)}</ul>
+            </> : <p className="memory-status">Sign in to let Aira remember things for you.</p>}
+          </div>}
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '16px' }}>
-            <button className="button button-outline" type="button" onClick={() => isLoggedIn ? setNotice('Your preferences are up to date.') : onLogin()}>{isLoggedIn ? 'Manage preferences' : 'Sign in to personalize'}</button>
+            {!isLoggedIn && <button className="button button-outline" type="button" onClick={onLogin}>Sign in to personalize</button>}
             {isLoggedIn && <button className="button button-ghost" style={{ borderColor: 'rgba(255, 99, 132, 0.4)', color: '#ff7b92' }} type="button" onClick={onLogout}>Sign Out</button>}
           </div>
         </section>}
@@ -899,6 +1110,13 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       {navItems.slice(0, 4).map(([label, icon]) => <button className={activeView === label ? 'selected' : ''} type="button" key={label} onClick={() => { setActiveView(label); setMobileMoreOpen(false) }}><span>{icon}</span><small>{label}</small></button>)}
       <button type="button" aria-expanded={mobileMoreOpen} onClick={() => setMobileMoreOpen((open) => !open)}><span>•••</span><small>More</small></button>
     </nav>
+
+    {/* Live voice call — full-screen dialog over the workspace */}
+    {voiceOpen && (
+      <Suspense fallback={null}>
+        <VoiceCall authToken={authToken} user={userProfile} prefs={voicePrefs} onClose={() => setVoiceOpen(false)} />
+      </Suspense>
+    )}
   </main>
 }
 
@@ -1046,15 +1264,15 @@ export default function Nexora() {
       setShowLogin(true)
       return
     }
+    /* Real checkout is not wired yet — this only flips the plan flag locally.
+       If the backend rejects it, surface the error rather than lying to the
+       session cache about being Pro. */
     try {
       const res = await upgradePlan(authToken, 'pro')
       const session = saveSession({ token: authToken, user: res.user })
       setUserProfile(session.userProfile)
     } catch (err) {
-      console.error(err)
-      const updated = { ...(userProfile || {}), isPremium: true, plan: 'pro' }
-      setUserProfile(updated)
-      if (authToken) saveSession({ token: authToken, user: updated })
+      console.error('[nexora] upgrade failed', err)
     }
   }
 

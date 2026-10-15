@@ -113,6 +113,12 @@ export async function getConversation(token, id) {
   return parseJson(res)
 }
 
+export async function deleteConversation(token, id) {
+  const res = await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'DELETE', headers: authHeaders(token) })
+  if (res.status === 204) return { ok: true }
+  return parseJson(res)
+}
+
 export async function upgradePlan(token, plan = 'pro') {
   const res = await fetch(`${API_BASE}/api/user/upgrade`, {
     method: 'POST',
@@ -194,6 +200,51 @@ async function parseJson(res) {
     throw err
   }
   return data
+}
+
+/**
+ * Mint a short-lived realtime client secret (server-side key stays hidden).
+ * Returns { clientSecret, sessionId, model, voice, maxSeconds, history, ... }.
+ * Rejects with a clear message when the backend has no real API key — the app
+ * never plays placeholder audio.
+ */
+export async function requestVoiceToken(token, { voice, language, assistantName, persona, conversationId } = {}) {
+  const res = await fetch(`${API_BASE}/api/voice/realtime/token`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ voice, language, assistantName, persona: persona || undefined, conversationId: conversationId || null }),
+  })
+  return parseJson(res)
+}
+
+/** Persist one completed spoken exchange; returns { conversationId, isNew }. */
+export async function logVoiceTurn(token, { conversationId, userText, assistantText }) {
+  const res = await fetch(`${API_BASE}/api/voice/realtime/turn`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ conversationId, userText, assistantText }),
+  })
+  return parseJson(res)
+}
+
+export async function listMemories(token) {
+  const res = await fetch(`${API_BASE}/api/memory`, { headers: authHeaders(token) })
+  return parseJson(res)
+}
+
+export async function saveMemory(token, { key, value, source }) {
+  const res = await fetch(`${API_BASE}/api/memory`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ key, value, source }),
+  })
+  return parseJson(res)
+}
+
+export async function deleteMemory(token, id) {
+  const res = await fetch(`${API_BASE}/api/memory/${id}`, { method: 'DELETE', headers: authHeaders(token) })
+  if (res.status === 204) return { ok: true }
+  return parseJson(res)
 }
 
 export { API_BASE, SESSION_KEY }

@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { config } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser, signToken } from '../middleware/auth.js'
+import { authLimiter } from '../middleware/rateLimit.js'
 
 const router = Router()
 
@@ -38,7 +39,7 @@ async function verifyGoogleToken(credential) {
   return payload
 }
 
-router.post('/register', async (req, res, next) => {
+router.post('/register', authLimiter, async (req, res, next) => {
   try {
     const body = registerSchema.parse(req.body)
     const db = getDb()
@@ -73,7 +74,7 @@ router.post('/register', async (req, res, next) => {
   }
 })
 
-router.post('/login', async (req, res, next) => {
+router.post('/login', authLimiter, async (req, res, next) => {
   try {
     const body = loginSchema.parse(req.body)
     const row = getDb().prepare('SELECT * FROM users WHERE email = ?').get(body.email.toLowerCase())
@@ -93,7 +94,7 @@ router.post('/login', async (req, res, next) => {
   }
 })
 
-router.post('/google', async (req, res, next) => {
+router.post('/google', authLimiter, async (req, res, next) => {
   try {
     const { credential } = googleSchema.parse(req.body)
     const googleUser = await verifyGoogleToken(credential)
