@@ -1,0 +1,95 @@
+<!doctype html>
+<!--
+  Copy to public/_<name>.html, replace the CHECKS block, then open
+  http://localhost:<port>/_<name>.html?cb=1   (bump ?cb every run — Vite caches public/)
+  Read results with: document.querySelector('pre').innerText
+  Delete the file when the run is clean.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>layout harness</title>
+    <style>
+      body { margin: 0; background: #0a0c14; color: #dfe4ee; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+      #out { white-space: pre-wrap; padding: 10px; }
+      #stage { position: fixed; left: -10000px; top: 0; }
+    </style>
+  </head>
+  <body>
+    <pre id="out">running...</pre>
+    <div id="stage"></div>
+    <script>
+      const log = []
+      const say = (s) => log.push(s)
+      let fails = 0
+      const ok = (label, pass, detail) => {
+        say(`${pass ? 'PASS' : 'FAIL'} | ${label}${detail ? ` — ${detail}` : ''}`)
+        if (!pass) fails += 1
+      }
+      /* a background tab renders no frames, so sampled animation positions prove
+         nothing there — report those as INFO, never PASS/FAIL */
+      const info = (label, detail) => say(`INFO | ${label}${detail ? ` — ${detail}` : ''}`)
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+      /* always longer than the slowest transition you are measuring */
+      const SETTLED = 550
+
+      /* stash ONLY these keys and put them back verbatim — never localStorage.clear() */
+      const KEYS = ['nexora_user_session', 'nexora_onboarding_pending']
+      const stash = {}
+      KEYS.forEach((k) => { stash[k] = localStorage.getItem(k); localStorage.removeItem(k) })
+      const restore = () => KEYS.forEach((k) => {
+        if (stash[k] === null) localStorage.removeItem(k)
+        else localStorage.setItem(k, stash[k])
+      })
+      window.addEventListener('pagehide', restore)
+
+      async function boot(width, height) {
+        const f = document.createElement('iframe')
+        f.style.cssText = `width:${width}px;height:${height}px;border:0`
+        document.getElementById('stage').appendChild(f)
+        f.src = '/'
+        await wait(1600)
+        const win = f.contentWindow
+        const doc = f.contentDocument
+        for (let i = 0; i < 60; i += 1) {
+          if (doc && doc.querySelector('.main-nav a')) break
+          await wait(250)
+        }
+        if (!doc.querySelector('.main-nav a')) throw new Error('app never rendered in the iframe')
+        /* deterministic: no smooth glide still moving mid-measure */
+        doc.documentElement.style.scrollBehavior = 'auto'
+        await wait(SETTLED)
+        return { win, doc }
+      }
+
+      const rect = (el) => el.getBoundingClientRect()
+      const overlaps = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top)
+      const visible = (el) => {
+        const r = rect(el)
+        const cs = el.ownerDocument.defaultView.getComputedStyle(el)
+        return r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden'
+      }
+
+      const main = async () => {
+        const { win, doc } = await boot(1440, 900)
+
+        say('===== CHECKS — replace this block =====')
+        const nav = doc.querySelector('.main-nav')
+        ok('nav rendered', !!nav)
+        ok('no element overlaps the fixed dock', ![...doc.querySelectorAll('.prompt-box, .workspace-page-panel')]
+          .some((el) => visible(el) && overlaps(rect(el), rect(doc.querySelector('.workspace-dock') || nav))))
+        info('viewport', `${win.innerWidth}x${win.innerHeight}`)
+
+        restore()
+        say(`\n${fails === 0 ? 'ALL CHECKS PASSED' : `FAILURES: ${fails}`}`)
+        document.getElementById('out').innerText = log.join('\n')
+      }
+
+      main().catch((err) => {
+        restore()
+        say(`threw: ${err.message}`)
+        document.getElementById('out').innerText = log.join('\n')
+      })
+    </script>
+  </body>
+</html>

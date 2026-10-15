@@ -1,0 +1,26 @@
+{
+  "name": "nexora-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Nexora AI backend — ChatGPT-style streaming chat, auth, memory & tools",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "db:reset": "node src/db/reset.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "nanoid": "^5.1.5",
+    "openai": "^5.12.2",
+    "zod": "^3.25.76"
+  }
+}
