@@ -1,5 +1,5 @@
 import OpenAI from 'openai'
-import { config, SYSTEM_PROMPT } from '../config.js'
+import { config, systemPromptFor } from '../config.js'
 
 function createClient() {
   if (!config.openaiApiKey) return null
@@ -9,13 +9,13 @@ function createClient() {
   })
 }
 
-function buildMessages(history, userMemories = []) {
+function buildMessages(history, userMemories = [], ctx = {}) {
   const memoryBlock = userMemories.length
     ? `\n\nKnown user context:\n${userMemories.map((m) => `- ${m.key}: ${m.value}`).join('\n')}`
     : ''
 
   return [
-    { role: 'system', content: SYSTEM_PROMPT + memoryBlock },
+    { role: 'system', content: systemPromptFor(ctx) + memoryBlock },
     ...history.map((m) => ({ role: m.role, content: m.content })),
   ]
 }
@@ -37,8 +37,8 @@ async function* mockStream(messages) {
   }
 }
 
-export async function* streamChatCompletion({ history, memories, model }) {
-  const messages = buildMessages(history, memories)
+export async function* streamChatCompletion({ history, memories, model, assistantName, userName, persona }) {
+  const messages = buildMessages(history, memories, { assistantName, userName, persona })
   const client = createClient()
   const usedModel = model || config.openaiModel
 
@@ -52,6 +52,7 @@ export async function* streamChatCompletion({ history, memories, model }) {
   const stream = await client.chat.completions.create({
     model: usedModel,
     messages,
+    max_tokens: 900,
     stream: true,
     stream_options: { include_usage: true },
   })
@@ -67,8 +68,8 @@ export async function* streamChatCompletion({ history, memories, model }) {
   }
 }
 
-export async function completeChat({ history, memories, model }) {
-  const messages = buildMessages(history, memories)
+export async function completeChat({ history, memories, model, assistantName, userName, persona }) {
+  const messages = buildMessages(history, memories, { assistantName, userName, persona })
   const client = createClient()
   const usedModel = model || config.openaiModel
 
@@ -85,6 +86,7 @@ export async function completeChat({ history, memories, model }) {
   const completion = await client.chat.completions.create({
     model: usedModel,
     messages,
+    max_tokens: 900,
   })
 
   return {

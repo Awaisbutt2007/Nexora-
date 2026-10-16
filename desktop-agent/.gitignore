@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+
+# Agent runtime state — personal data (approval grants, audit trail, automation
+# browser profile, screenshots). Never commit.
+data/
+audit/
+browser-profile/
+screenshots/

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import './Nexora.css'
 import './typography.css'
 import SignIn from './SignIn.jsx'
@@ -16,6 +17,7 @@ import {
   saveMemory,
   saveSession,
   streamChat,
+  runTool,
   upgradePlan,
 } from './api/nexora.js'
 
@@ -84,12 +86,12 @@ function initialNavHash() {
 
 const navItems = [['Home', '⌂'], ['Chat', '◌'], ['History', '⧗'], ['Tools', '▦'], ['Memory', '◈'], ['Settings', '⚙']]
 const tools = [
-  ['▧', 'Image Generator', 'Create striking images from a simple prompt.', 'violet'],
-  ['⌘', 'Code Assistant', 'Write, debug, and explain code with context.', 'blue'],
-  ['▣', 'PDF Reader', 'Ask questions and find details in any PDF.', 'pink'],
-  ['▶', 'YouTube Notes', 'Turn long videos into clear takeaways.', 'cyan'],
-  ['◉', 'Meeting Notes', 'Capture decisions and next steps automatically.', 'violet'],
-  ['✦', 'Social Studio', 'Shape one idea into content for every channel.', 'green'],
+  ['▧', 'Image Generator', 'Create striking images from a simple prompt.', 'violet', 'image_generator', 'Describe the image you want — scene, style, mood…'],
+  ['⌘', 'Code Assistant', 'Write, debug, and explain code with context.', 'blue', 'code_assistant', 'Describe the code you need: language, inputs, expected behaviour…'],
+  ['▣', 'PDF Reader', 'Ask questions and find details in any PDF.', 'pink', 'pdf_reader', 'Paste the document text, then ask your question…'],
+  ['▶', 'YouTube Notes', 'Turn long videos into clear takeaways.', 'cyan', 'youtube_notes', 'Paste a transcript or describe the video topic…'],
+  ['◉', 'Meeting Notes', 'Capture decisions and next steps automatically.', 'violet', 'meeting_notes', 'Paste your raw meeting notes or agenda…'],
+  ['✦', 'Social Studio', 'Shape one idea into content for every channel.', 'green', 'social_studio', 'Describe the idea and the tone you want…'],
 ]
 
 const featureList = [
@@ -540,6 +542,205 @@ function loadChatDrawer() {
   }
 }
 
+/* Render a chat turn: markdown images become a clickable <ChatImage> (lightbox +
+   download), fenced ``` code becomes a <CodeBlock> with a copy button, and
+   everything else stays plain text. The backend emits ![cap](https://…image…)
+   for detected image requests and the model's fallback uses ![cap](IMAGE:desc),
+   which we resolve to the same keyless provider here — and refuse if adult. */
+const BLOCK_RE = /(```[\w+-]*\n?[\s\S]*?```|!\[[^\]]*\]\([^)]+\))/g
+const IMAGE_TOKEN_RE = /!\[[^\]]*\]\(([^)]+)\)/
+/* Mirror of the backend NSFW gate so a model-authored IMAGE: marker can't slip an
+   adult picture past the client either. */
+const CLIENT_NSFW = /(nude|naked|nsfw|porn|sex|sexy|erotic|xxx|boob|tit|penis|vagina|breast|nipple|anal|blowjob|orgasm|bikini|lingerie|topless|see[\s-]?through|onlyfans|hentai|chudai|chod|nangi|nanga|jism|shahwat|فحش|ننگی)/i
+const IMG_QUALITY = 'width=1024&height=1024&nologo=true&enhance=true&model=flux'
+
+function renderChatContent(text) {
+  if (!text) return text
+  const nodes = []
+  let last = 0
+  let n = 0
+  let match
+  BLOCK_RE.lastIndex = 0
+  while ((match = BLOCK_RE.exec(text))) {
+    if (match.index > last) {
+      const seg = text.slice(last, match.index).replace(/^\n+/, '').replace(/\n+$/, '')
+      if (seg) nodes.push(seg)
+    }
+    const token = match[0]
+    if (token.startsWith('```')) {
+      const inner = token.slice(3, -3)
+      const nl = inner.indexOf('\n')
+      const lang = nl >= 0 ? inner.slice(0, nl).trim() : ''
+      const code = nl >= 0 ? inner.slice(nl + 1).replace(/\n$/, '') : inner
+      nodes.push(<CodeBlock key={`code-${n++}`} lang={lang} code={code} />)
+    } else {
+      const m = IMAGE_TOKEN_RE.exec(token)
+      const url = (m ? m[1] : '').trim()
+      if (url.startsWith('IMAGE:')) {
+        const desc = url.slice(6).trim()
+        nodes.push(CLIENT_NSFW.test(desc)
+          ? <span key={`blk-${n++}`} className="chat-img-blocked">🚫 Adult content is not allowed on Nexora.</span>
+          : <ChatImage key={`img-${n++}`} src={`https://image.pollinations.ai/prompt/${encodeURIComponent(desc)}?${IMG_QUALITY}`} />)
+      } else if (url) {
+        nodes.push(<ChatImage key={`img-${n++}`} src={url} />)
+      }
+    }
+    last = match.index + token.length
+  }
+  if (last < text.length) nodes.push(text.slice(last))
+  return nodes
+}
+
+/* A fenced code block with a language tag and a copy-to-clipboard button. */
+function CodeBlock({ lang, code }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+    } catch {
+      /* Older/insecure contexts block the async API — fall back to a temp field. */
+      const ta = document.createElement('textarea')
+      ta.value = code
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      try { document.execCommand('copy') } catch { /* ignore */ }
+      document.body.removeChild(ta)
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1600)
+  }
+  return (
+    <div className="chat-code">
+      <div className="chat-code-bar">
+        <span className="chat-code-lang">{lang || 'code'}</span>
+        <button type="button" className="chat-code-copy" onClick={copy}>{copied ? '✓ Copied!' : '⧉ Copy code'}</button>
+      </div>
+      <pre className="chat-code-pre"><code>{code}</code></pre>
+    </div>
+  )
+}
+
+/* A generated image with a loading state, a click-to-open lightbox and a
+   download button. Pollinations can take tens of seconds, so we shimmer a
+   "Generating…" placeholder instead of a broken-image icon and allow retry. */
+function ChatImage({ src, alt = 'Generated image' }) {
+  const [nonce, setNonce] = useState(0)
+  const [status, setStatus] = useState('loading')
+  const [open, setOpen] = useState(false)
+  const url = nonce ? `${src}${src.includes('?') ? '&' : '?'}retry=${nonce}` : src
+
+  const download = async () => {
+    const m = /\/prompt\/([^?]+)/.exec(url)
+    const base = m ? decodeURIComponent(m[1]).slice(0, 40).replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() : ''
+    const fileName = `${base || 'nexora-image'}.jpg`
+    try {
+      const res = await fetch(url)
+      const blob = await res.blob()
+      const objUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objUrl
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objUrl)
+    } catch {
+      /* CORS blocked the blob — open the raw URL in a new tab so the user can save. */
+      const a = document.createElement('a')
+      a.href = url
+      a.target = '_blank'
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    }
+  }
+
+  return (
+    <span className={`chat-img${status === 'ready' ? ' is-ready' : ''}`}>
+      {status !== 'ready' && (
+        <span className="chat-img-ph" role="status" aria-live="polite">
+          {status === 'error'
+            ? <button type="button" onClick={() => { setStatus('loading'); setNonce((v) => v + 1) }}>Image failed — tap to retry</button>
+            : <><span className="chat-img-spin" aria-hidden="true" />Generating image…</>}
+        </span>
+      )}
+      {status !== 'error' && (
+        <img
+          className="chat-inline-image"
+          src={url}
+          alt={alt}
+          loading="lazy"
+          onLoad={() => setStatus('ready')}
+          onError={() => setStatus('error')}
+          onClick={() => { if (status === 'ready') setOpen(true) }}
+        />
+      )}
+      {status === 'ready' && <span className="chat-img-hint" aria-hidden="true">🔍 Click to view</span>}
+      {open && createPortal(
+        <div className="chat-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" onClick={() => setOpen(false)}>
+          <div className="chat-lightbox-inner" onClick={(e) => e.stopPropagation()}>
+            <img src={url} alt={alt} className="chat-lightbox-img" />
+            <div className="chat-lightbox-actions">
+              <button type="button" className="chat-lightbox-btn primary" onClick={download}>⬇ Download</button>
+              <button type="button" className="chat-lightbox-btn" onClick={() => setOpen(false)}>✕ Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </span>
+  )
+}
+
+/* A real tool runner: takes the user's prompt, calls POST /api/tools/:id/run and
+   renders whatever comes back — an image (lightbox + download), a code/text
+   answer (same parser as chat, so fences get a copy button), or a clear error.
+   Self-contained state, keyed by tool title from the parent so switching tools
+   resets the panel. */
+function ToolRunner({ entry, token, aiName, persona, isLoggedIn, onLogin, onCredits }) {
+  const [, title, description, , toolId, placeholder] = entry
+  const [value, setValue] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+
+  async function run() {
+    if (!isLoggedIn || !token) { onLogin(); return }
+    const clean = value.trim()
+    if (!clean || running) return
+    setRunning(true); setError(''); setResult(null)
+    try {
+      const res = await runTool(token, toolId, { prompt: clean, assistantName: aiName, persona: persona || undefined })
+      setResult(res.output)
+      if (res.user && onCredits) onCredits(res.user)
+    } catch (err) {
+      setError(err.message || 'The tool could not run right now.')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="tool-runner">
+      <div className="tool-runner-head"><span className="showcase-icon">{entry[0]}</span><div><strong>{title}</strong><small>{description}</small></div></div>
+      <textarea className="tool-runner-input" rows={3} aria-label={`${title} prompt`} placeholder={placeholder} value={value} onChange={(event) => setValue(event.target.value)} disabled={running} />
+      <div className="tool-runner-foot"><button type="button" className="tool-runner-run" onClick={run} disabled={running || !value.trim()}>{running ? `${aiName} is working…` : `Run ${title}`}</button></div>
+      {error && <div className="tool-runner-error" role="alert">⚠️ {error}</div>}
+      {result && <div className="tool-runner-result" aria-live="polite">
+        {result.blocked
+          ? <span className="chat-img-blocked">🚫 {result.note}</span>
+          : result.type === 'image'
+            ? <><ChatImage src={result.imageUrl} /><p className="tool-runner-note">{result.note}</p></>
+            : <div className="chat-text">{renderChatContent(result.answer)}</div>}
+      </div>}
+    </div>
+  )
+}
+
 function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, isLoggedIn, userProfile, authToken, onLogin, onLogout, onUpgrade, onProfileUpdate }) {
   const [prompt, setPrompt] = useState('')
   const [conversationId, setConversationId] = useState(null)
@@ -580,6 +781,14 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   const userInitial = userName.charAt(0).toUpperCase()
   const userAvatar = userProfile?.avatar || null
   const isPremium = userProfile?.isPremium === true
+  /* The name the user chose at onboarding (voice already uses it); chat must match. */
+  const aiName = voicePrefs.assistantName || 'Nexora'
+  /* Landing CTAs and saved sessions enter the workspace with activeView='Home', but
+     there is no Home panel here — treat it as Chat so the pane is never blank and a
+     nav button is always the selected one. */
+  const view = activeView === 'Home' ? 'Chat' : activeView
+  /* Which tool card is open in the Tools view (matched by its display title). */
+  const selectedEntry = tools.find((t) => t[1] === selectedTool) || null
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -743,6 +952,8 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       const result = await streamChat({
         token: authToken,
         message: cleanPrompt,
+        assistantName: aiName,
+        persona: voicePrefs.persona,
         conversationId,
         onDelta: (_chunk, fullText) => {
           setMessages((prev) =>
@@ -762,7 +973,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
             : m,
         ),
       )
-      setNotice('Nexora replied.')
+      setNotice(`${aiName} replied.`)
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) =>
@@ -802,6 +1013,8 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       const result = await streamChat({
         token: authToken,
         message: cleanPrompt,
+        assistantName: aiName,
+        persona: voicePrefs.persona,
         conversationId: drawerConversationId,
         onDelta: (_chunk, fullText) => {
           setDrawerMessages((prev) =>
@@ -836,11 +1049,15 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     <section className="workspace-main">
       <header className="workspace-topbar">
         <Brand compact />
+        {/* Primary workspace nav. The bottom mobile-workspace-nav is display:none and
+           the old dock was removed (its Memory/Settings live in the account drawer),
+           so Chat/History/Tools are otherwise unreachable — expose them here. */}
+        <nav className="workspace-nav" aria-label="Workspace navigation">{['Chat', 'History', 'Tools'].map((label) => <button type="button" key={label} className={`workspace-nav-btn${view === label ? ' selected' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => setActiveView(label)}>{label}</button>)}</nav>
         <div className="workspace-actions">
           <button
             className="header-voice-btn"
             type="button"
-            title="Talk to Nexora out loud"
+            title={`Talk to ${aiName} out loud`}
             onClick={() => {
               if (!isLoggedIn || !authToken) {
                 onLogin()
@@ -946,12 +1163,12 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
           </div>
         </div>
       </header>
-      <div className="workspace-content" key={activeView}>
-        {activeView === 'Chat' && <section className="workspace-page-panel chat-page">
+      <div className="workspace-content" key={view}>
+        {view === 'Chat' && <section className="workspace-page-panel chat-page">
           {messages.length === 0 ? (
             <div className="chat-empty">
               <span className="chat-orb">✦</span>
-              <h2>Hi, I’m Nexora.</h2>
+              <h2>Hi, I’m {aiName}.</h2>
               <p>What can I help you think through today?</p>
               <div>{['Explain a concept', 'Write a first draft', 'Plan my day'].map((item) => (
                 <button type="button" key={item} onClick={() => setPrompt(item)}>{item}</button>
@@ -962,8 +1179,8 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
             <div className="chat-thread" role="log" aria-live="polite">
               {messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => (
                 <div key={m.id} className={`chat-bubble ${m.role}${m.error ? ' chat-error' : ''}`}>
-                  <span className="chat-bubble-label">{m.role === 'user' ? 'You' : 'Nexora'}</span>
-                  <p>{m.content || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</p>
+                  <span className="chat-bubble-label">{m.role === 'user' ? 'You' : aiName}</span>
+                  <div className="chat-text">{renderChatContent(m.content) || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</div>
                 </div>
               ))}
               <div ref={chatEndRef} />
@@ -971,14 +1188,15 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
           )}
           <form className="prompt-box" onSubmit={sendPrompt}>
             <label className="sr-only" htmlFor="chat-prompt">Type your message</label>
-            <input id="chat-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={streaming ? 'Nexora is typing…' : 'Type your message...'} disabled={streaming} />
+            <input id="chat-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={streaming ? `${aiName} is typing…` : 'Type your message...'} autoComplete="off" disabled={streaming} />
             <button type="submit" aria-label="Send message" disabled={streaming || !prompt.trim()}>→</button>
           </form>
         </section>}
-        {activeView === 'Tools' && <div className="workspace-page-panel">
-          <div className="workspace-tool-grid">{tools.map(([icon, title, description, tint]) => <button className={`workspace-tool tint-${tint} ${selectedTool === title ? 'tool-highlighted' : ''}`} type="button" key={title} onClick={() => { if (setSelectedTool) setSelectedTool(title); setNotice(`${title} is ready to try.`) }}><span className="showcase-icon">{icon}</span><strong>{title}</strong><small>{description}</small><b>Open tool →</b></button>)}</div>
+        {view === 'Tools' && <div className="workspace-page-panel">
+          <div className="workspace-tool-grid">{tools.map(([icon, title, description, tint]) => <button className={`workspace-tool tint-${tint} ${selectedTool === title ? 'tool-highlighted' : ''}`} type="button" key={title} onClick={() => { setSelectedTool(title); setNotice(`${title} ready — describe what you need below.`) }}><span className="showcase-icon">{icon}</span><strong>{title}</strong><small>{description}</small><b>{selectedTool === title ? 'Selected ✓' : 'Open tool →'}</b></button>)}</div>
+          {selectedEntry && <ToolRunner key={selectedEntry[1]} entry={selectedEntry} token={authToken} aiName={aiName} persona={voicePrefs.persona} isLoggedIn={isLoggedIn} onLogin={onLogin} onCredits={onProfileUpdate} />}
         </div>}
-        {activeView === 'History' && <section className="workspace-page-panel history-panel">
+        {view === 'History' && <section className="workspace-page-panel history-panel">
           <div className="settings-icon">⧗</div>
           <h2>Every chat, text and voice, in one place.</h2>
           <p>Aira keeps spoken calls in the same thread list as your typed chats. Open one to continue where you left off, or delete it — the transcript goes with it.</p>
@@ -994,11 +1212,11 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
             </li>)}</ul>
           </>}
         </section>}
-        {(activeView === 'Memory' || activeView === 'Settings') && <section className="workspace-page-panel settings-panel">
-          <div className="settings-icon">{activeView === 'Memory' ? '◈' : '⚙'}</div>
-          <h2>{activeView === 'Memory' ? 'A little context goes a long way.' : 'Your space, your way.'}</h2>
-          <p>{activeView === 'Memory' ? 'Everything Aira is allowed to remember lives here — review, edit or delete any of it.' : 'Choose how Aira sounds and which languages she answers in.'}</p>
-          {activeView === 'Settings' && <div className="settings-voice-grid">
+        {(view === 'Memory' || view === 'Settings') && <section className="workspace-page-panel settings-panel">
+          <div className="settings-icon">{view === 'Memory' ? '◈' : '⚙'}</div>
+          <h2>{view === 'Memory' ? 'A little context goes a long way.' : 'Your space, your way.'}</h2>
+          <p>{view === 'Memory' ? 'Everything Aira is allowed to remember lives here — review, edit or delete any of it.' : 'Choose how Aira sounds and which languages she answers in.'}</p>
+          {view === 'Settings' && <div className="settings-voice-grid">
             <label className="settings-field"><span>Voice</span>
               <select value={voicePrefs.voice} onChange={(event) => persistVoicePrefs({ ...voicePrefs, voice: event.target.value })}>
                 {VOICE_OPTIONS.map(([id, name, hint]) => <option key={id} value={id}>{name} — {hint}</option>)}
@@ -1063,8 +1281,21 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
           onDoubleClick={() => setChatWidth(CHAT_DRAWER_DEFAULT)}
         />
         <header className="chat-drawer-head">
-          <span className="chat-drawer-title"><span aria-hidden="true">✦</span> Nexora Chat</span>
+          <span className="chat-drawer-title"><span aria-hidden="true">✦</span> {aiName} Chat</span>
           <div className="chat-drawer-tools">
+            <button
+              type="button"
+              className="chat-drawer-voice"
+              aria-label={`Talk to ${aiName} out loud`}
+              title={`Talk to ${aiName} out loud`}
+              onClick={() => {
+                if (!isLoggedIn || !authToken) {
+                  onLogin()
+                  return
+                }
+                setVoiceOpen(true)
+              }}
+            ><span aria-hidden="true">◉</span></button>
             <button
               type="button"
               className={`chat-drawer-pin ${chatPinned ? 'is-pinned' : ''}`}
@@ -1087,19 +1318,30 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
             </div>
           ) : (
             <div className="chat-drawer-thread" role="log" aria-live="polite">
-              {drawerMessages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => (
-                <div key={m.id} className={`chat-bubble ${m.role}${m.error ? ' chat-error' : ''}`}>
-                  <span className="chat-bubble-label">{m.role === 'user' ? 'You' : 'Nexora'}</span>
-                  <p>{m.content || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</p>
-                </div>
-              ))}
+              {drawerMessages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => {
+                /* Each turn is one flex ROW (avatar + bubble) — rows can never
+                   overlap, which is what the old align-self bubbles risked. */
+                const mine = m.role === 'user'
+                const initial = (mine ? userName : 'N').trim().charAt(0).toUpperCase() || 'N'
+                return (
+                  <div key={m.id} className={`chat-msg${mine ? ' mine' : ''}${m.error ? ' is-error' : ''}`}>
+                    <span className="chat-msg-avatar" aria-hidden="true">{mine ? initial : '✦'}</span>
+                    <div className="chat-msg-main">
+                      <span className="chat-msg-name">{mine ? 'You' : aiName}</span>
+                      <div className="chat-msg-bubble">
+                        <div className="chat-text">{renderChatContent(m.content) || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
               <div ref={drawerEndRef} />
             </div>
           )}
         </div>
         <form className="chat-drawer-input" onSubmit={sendDrawerPrompt}>
           <label className="sr-only" htmlFor="drawer-prompt">Type your message</label>
-          <input id="drawer-prompt" value={drawerPrompt} onChange={(event) => setDrawerPrompt(event.target.value)} placeholder={drawerStreaming ? 'Nexora is typing…' : 'Ask Nexora anything...'} disabled={drawerStreaming} />
+          <input id="drawer-prompt" type="text" value={drawerPrompt} onChange={(event) => setDrawerPrompt(event.target.value)} placeholder={drawerStreaming ? `${aiName} is typing…` : `Ask ${aiName} anything...`} autoComplete="off" disabled={drawerStreaming} />
           <button type="submit" aria-label="Send message" disabled={drawerStreaming || !drawerPrompt.trim()}>→</button>
         </form>
       </aside>

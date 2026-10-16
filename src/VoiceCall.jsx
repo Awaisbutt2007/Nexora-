@@ -282,6 +282,10 @@ export default function VoiceCall({ authToken, user, prefs = {}, onClose }) {
         setErrorText('Microphone permission was blocked. Allow it in the browser (padlock icon) and retry.')
       } else if (err.name === 'NotFoundError') {
         setErrorText('No microphone found. Plug one in or pick an input device, then retry.')
+      } else if (err instanceof TypeError) {
+        /* fetch() rejected at the network layer — the API is down / restarting or
+           unreachable. A bare "Failed to fetch" tells the user nothing useful. */
+        setErrorText('Could not reach the Nexora voice server. Make sure the API is running (npm run dev:api), then retry.')
       } else {
         setErrorText(err.message || 'Could not start the voice session.')
       }

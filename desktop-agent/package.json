@@ -1,0 +1,25 @@
+{
+  "name": "nexora-desktop-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Nexora local desktop agent — a loopback-only, allowlisted, permission-gated bridge that lets Aira perform authorized tasks on your own Windows PC. Binds 127.0.0.1, requires a shared secret, default-deny, always-confirm for destructive actions.",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "test": "node --test",
+    "browsers:install": "playwright install chromium"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "nanoid": "^5.1.5",
+    "zod": "^3.25.76"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.49.1"
+  }
+}

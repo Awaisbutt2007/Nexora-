@@ -141,6 +141,8 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
   const [faceBox, setFaceBox] = useState(null)
   const [facePhotoName, setFacePhotoName] = useState(typeof saved.facePhotoName === 'string' ? saved.facePhotoName : '')
   const faceInputRef = useRef(null)
+  /* Reveal stage: the Back / Enter buttons stay hidden until Aira finishes speaking */
+  const [introDone, setIntroDone] = useState(false)
 
   const STEPS = [
     source === 'signup' ? 'Account created' : 'Google connected',
@@ -510,11 +512,18 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
     })
   }
 
-  /* Reveal stage: the AI introduces itself out loud, synced with the typewriter */
+  /* Reveal stage: the AI introduces itself out loud, synced with the typewriter.
+     The footer buttons only appear once the speech ends (onend) — with a
+     watchdog fallback so a dropped onend never traps the user on the screen. */
   useEffect(() => {
     if (stage !== 4) return undefined
-    const timer = setTimeout(() => speakLine(introLine), 1200)
-    return () => { clearTimeout(timer); window.speechSynthesis?.cancel() }
+    setIntroDone(false)
+    let fallback = 0
+    const timer = setTimeout(() => {
+      speakLine(introLine, { onend: () => setIntroDone(true) })
+      fallback = setTimeout(() => setIntroDone(true), 20000)
+    }, 1200)
+    return () => { clearTimeout(timer); clearTimeout(fallback); window.speechSynthesis?.cancel() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage])
 
@@ -738,8 +747,10 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
 
           {stage === 4 && (
             <div className="reveal-block">
-              {/* Back pinned to the far left, the next action to the far right */}
-              <div className="reveal-actions">
+              {/* Back pinned to the far left, the next action to the far right.
+                  Space is reserved (visibility, not display) so the layout never
+                  jumps — the row only becomes visible once the intro has played. */}
+              <div className={`reveal-actions${introDone ? ' show' : ''}`}>
                 <button className="voice-back" type="button" onClick={() => { window.speechSynthesis?.cancel(); setStage(3) }}>Back</button>
                 <button className="onboarding-continue" type="button" onClick={handleFinish}>Enter Nexora</button>
               </div>

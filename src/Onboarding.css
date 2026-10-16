@@ -672,14 +672,14 @@
   align-items: center;
   justify-content: center;
   text-align: center;
-  gap: clamp(10px, 3vh, 30px);
+  gap: clamp(8px, 2.4vh, 22px);
+  overflow: hidden; /* the reveal is sized to fit — never scrolls, never shows a bar */
 }
 
 .onboarding-body.reveal .onboarding-visual {
   order: -1;
-  /* 46vh only bites on short windows, where the centered stack would otherwise
-     overflow upward and get clipped right against the pinned step labels */
-  width: min(66vw, 480px, 46vh);
+  /* Kept small enough that portrait + greeting + buttons all fit one screen */
+  width: min(52vw, 360px, 34vh);
 }
 
 .onboarding-body.reveal .onboarding-copy {
@@ -690,7 +690,9 @@
 }
 
 .onboarding-body.reveal .onboarding-copy h1 {
-  margin-bottom: 22px;
+  margin: 0 0 18px;
+  font-size: clamp(21px, 3vw, 33px);
+  line-height: 1.22;
 }
 
 .reveal-block {
@@ -702,6 +704,19 @@
      two buttons and space-between has no free space to distribute */
   width: 100%;
   max-width: 560px;
+}
+
+/* The footer buttons are invisible (but still hold their space, so the
+   greeting never jumps) until the spoken intro completes and `.show` lands. */
+.reveal-actions {
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+
+.reveal-actions.show {
+  visibility: visible;
+  opacity: 1;
 }
 
 @media (max-width: 900px) {

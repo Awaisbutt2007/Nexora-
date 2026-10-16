@@ -128,11 +128,11 @@ export async function upgradePlan(token, plan = 'pro') {
   return parseJson(res)
 }
 
-export async function runTool(token, toolId, { prompt, input } = {}) {
+export async function runTool(token, toolId, { prompt, input, assistantName, persona } = {}) {
   const res = await fetch(`${API_BASE}/api/tools/${toolId}/run`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ prompt, input }),
+    body: JSON.stringify({ prompt, input, assistantName, persona }),
   })
   return parseJson(res)
 }
@@ -141,11 +141,11 @@ export async function runTool(token, toolId, { prompt, input } = {}) {
  * Stream chat like ChatGPT (SSE). Calls onDelta(textChunk) for each piece.
  * Returns { conversationId, fullText }.
  */
-export async function streamChat({ token, message, conversationId = null, onDelta, onMeta }) {
+export async function streamChat({ token, message, conversationId = null, assistantName, persona, onDelta, onMeta }) {
   const res = await fetch(`${API_BASE}/api/chat/completions`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ message, conversationId, stream: true }),
+    body: JSON.stringify({ message, conversationId, assistantName, persona, stream: true }),
   })
 
   if (!res.ok) {

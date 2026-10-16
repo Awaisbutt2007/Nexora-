@@ -4,6 +4,8 @@ import { z } from 'zod'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
 import { deductCredits, ensureCredits } from '../services/credits.js'
+import { buildImageUrl, isNsfwPrompt } from '../services/images.js'
+import { completeChat } from '../services/ai.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -68,7 +70,7 @@ router.get('/runs', (req, res) => {
   res.json({ object: 'list', data: rows })
 })
 
-router.post('/:toolId/run', (req, res, next) => {
+router.post('/:toolId/run', async (req, res, next) => {
   try {
     const tool = TOOL_CATALOG.find((t) => t.id === req.params.toolId)
     if (!tool) {
@@ -76,8 +78,10 @@ router.post('/:toolId/run', (req, res, next) => {
     }
 
     const schema = z.object({
-      prompt: z.string().trim().min(1).max(8000).optional(),
+      prompt: z.string().trim().max(8000).optional(),
       input: z.record(z.string(), z.unknown()).optional(),
+      assistantName: z.string().trim().max(40).optional(),
+      persona: z.string().trim().max(400).optional(),
     })
     const body = schema.parse(req.body || {})
     const payload = {
@@ -89,7 +93,11 @@ router.post('/:toolId/run', (req, res, next) => {
 
     const id = `run_${nanoid(16)}`
     const stamp = nowIso()
-    const output = mockToolOutput(tool, payload)
+    const output = await buildToolOutput(tool, payload, {
+      assistantName: body.assistantName,
+      userName: req.user.name,
+      persona: body.persona,
+    })
 
     getDb()
       .prepare(
@@ -124,60 +132,50 @@ function safeJson(value) {
   }
 }
 
-function mockToolOutput(tool, payload) {
+/* Each text tool is a focused instruction that turns the user's pasted prompt
+   into a real model run (via completeChat) instead of a canned placeholder. In
+   mock mode it still streams the honest mock reply; with a key set it is the
+   live model. The answer is returned as markdown and rendered on the client by
+   the same parser the chat uses (code fences → copy button, images → lightbox). */
+const TOOL_BRIEF = {
+  code_assistant: 'You are the Nexora Code Assistant. Write complete, correct, ready-to-run code for the request. Put the full solution inside one fenced code block tagged with the language, then add a short explanation. Do not leave TODO placeholders or empty stub bodies.',
+  pdf_reader: 'You are the Nexora PDF Reader. If the user pasted document text, summarize it and answer their questions with short supporting quotes. If they only gave a title or a question with no text, ask them to paste the document text — Nexora does not fetch files on its own.',
+  youtube_notes: 'You are the Nexora Notes tool. Turn the transcript or topic the user pastes into concise takeaways: a two-line summary, key points as bullets, and suggested action items. If no content was pasted, ask for the transcript or notes.',
+  meeting_notes: 'You are the Nexora Meeting Notes tool. From the raw notes the user pastes, produce Decisions, Action Items (owner + task) and Open Questions. If nothing was pasted, ask for the raw notes.',
+  social_studio: "You are the Nexora Social Studio. Rewrite the user's idea into polished, platform-native copy for X/Twitter, LinkedIn and Instagram, each under its own bold heading, ready to post.",
+}
+
+async function buildToolOutput(tool, payload, ctx) {
   const prompt = payload.prompt || JSON.stringify(payload)
 
-  switch (tool.id) {
-    case 'image_generator':
-      return {
-        type: 'image',
-        prompt,
-        imageUrl: null,
-        note: 'Mock mode: connect an image provider (DALL·E / Flux) to return real images.',
-        placeholder: `Generated concept for: ${prompt.slice(0, 120)}`,
-      }
-    case 'code_assistant':
-      return {
-        type: 'code',
-        language: 'javascript',
-        explanation: `Here is a starting point for: ${prompt.slice(0, 160)}`,
-        code: `// Nexora Code Assistant\n// Request: ${prompt.slice(0, 80)}\n\nfunction solve() {\n  // TODO: implement\n  return true;\n}\n\nconsole.log(solve());\n`,
-      }
-    case 'pdf_reader':
-      return {
-        type: 'document',
-        summary: `PDF analysis ready for: ${prompt.slice(0, 160)}`,
-        highlights: ['Upload a PDF via /api/files to enable real extraction.', 'Ask follow-up questions in Chat.'],
-      }
-    case 'youtube_notes':
-      return {
-        type: 'notes',
-        title: 'YouTube Notes',
-        bullets: [
-          `Topic focus: ${prompt.slice(0, 100)}`,
-          'Key takeaway 1 — context & problem',
-          'Key takeaway 2 — solution steps',
-          'Action item — try this in Nexora Chat',
-        ],
-      }
-    case 'meeting_notes':
-      return {
-        type: 'meeting',
-        decisions: ['Capture attendees and agenda next.'],
-        actionItems: [{ owner: 'You', task: prompt.slice(0, 120) || 'Follow up', due: null }],
-      }
-    case 'social_studio':
-      return {
-        type: 'social',
-        variants: {
-          twitter: prompt.slice(0, 240),
-          linkedin: `Insight:\n\n${prompt}\n\n— via Nexora`,
-          instagram: `${prompt.slice(0, 180)}\n\n#Nexora #AI`,
-        },
-      }
-    default:
-      return { type: 'generic', result: prompt }
+  if (tool.id === 'image_generator') {
+    return isNsfwPrompt(prompt)
+      ? {
+          type: 'image',
+          prompt,
+          imageUrl: null,
+          blocked: true,
+          note: 'Adult/NSFW content is not allowed on Nexora. Try a different, safe prompt.',
+        }
+      : {
+          type: 'image',
+          prompt,
+          imageUrl: buildImageUrl(prompt),
+          note: 'Rendered with the free Pollinations (Flux) model. Swap in a funded DALL·E / Flux key in services/images.js for even higher resolution.',
+        }
   }
+
+  const brief = TOOL_BRIEF[tool.id]
+  if (!brief) return { type: 'text', prompt, answer: prompt }
+
+  const content = `${brief}\n\nUser request:\n${prompt || '(nothing provided yet)'}`
+  const result = await completeChat({
+    history: [{ role: 'user', content }],
+    assistantName: ctx.assistantName,
+    userName: ctx.userName,
+    persona: ctx.persona,
+  })
+  return { type: 'text', prompt, answer: result.content, model: result.model }
 }
 
 export default router

@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import cors from 'cors'
 import express from 'express'
 import { config } from './config.js'
@@ -86,7 +87,15 @@ app.use('/api/voice', voiceRoutes)
 app.use(notFound)
 app.use(errorHandler)
 
-app.listen(config.port, config.host, () => {
-  console.log(`Nexora backend listening on http://${config.host}:${config.port}`)
-  console.log(`AI mode: ${config.openaiApiKey ? `OpenAI (${config.openaiModel})` : 'mock streaming (set OPENAI_API_KEY)'}`)
-})
+export { app }
+
+/* Only bind a port when this file is the entry point (`node src/index.js` /
+   `npm run dev`). Importing `app` from the test suite starts it on an ephemeral
+   port instead, so the automated tests never fight the dev server for :8787. */
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isDirectRun) {
+  app.listen(config.port, config.host, () => {
+    console.log(`Nexora backend listening on http://${config.host}:${config.port}`)
+    console.log(`AI mode: ${config.openaiApiKey ? `OpenAI (${config.openaiModel})` : 'mock streaming (set OPENAI_API_KEY)'}`)
+  })
+}

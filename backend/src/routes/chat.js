@@ -5,6 +5,7 @@ import { config } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
 import { completeChat, estimateCredits, streamChatCompletion } from '../services/ai.js'
+import { buildImageUrl, detectImageRequest, isNsfwPrompt } from '../services/images.js'
 import { deductCredits, ensureCredits } from '../services/credits.js'
 import { titleFromPrompt } from './conversations.js'
 
@@ -23,11 +24,38 @@ const chatSchema = z.object({
     .optional(),
   conversationId: z.string().optional().nullable(),
   model: z.string().trim().max(80).optional(),
+  assistantName: z.string().trim().max(40).optional(),
+  persona: z.string().trim().max(400).optional(),
   stream: z.boolean().optional().default(true),
 })
 
 function writeSse(res, payload) {
   res.write(`data: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`)
+}
+
+/* "remember …" / "yad rakho …" — a lightweight, deterministic way for the user to
+   teach the assistant, matching the onboarding promise. No LLM round-trip needed. */
+const REMEMBER_RE = /(?:\bremember(?:\s+that)?\b|\bkeep\s+in\s+mind\b|\bnote\s+that\b|\bsave\s+that\b|\by[ae]d\s+ra[kc]ho\b|\bya?ad\s+ra[kc]h\b)\s*[-:]?\s*(.+)/i
+function detectRememberRequest(text) {
+  if (!text) return null
+  const m = REMEMBER_RE.exec(text)
+  if (!m) return null
+  const fact = (m[1] || '').trim().replace(/[.!?]+$/, '')
+  return fact.length >= 3 ? fact.slice(0, 500) : null
+}
+
+function saveMemory(db, userId, fact, stamp) {
+  const key = fact.split(/\s+/).slice(0, 5).join(' ').slice(0, 60) || 'note'
+  const existing = db.prepare('SELECT id FROM memories WHERE user_id = ? AND key = ?').get(userId, key)
+  if (existing) {
+    db.prepare('UPDATE memories SET value = ?, source = ?, updated_at = ? WHERE id = ?').run(fact, 'user', stamp, existing.id)
+    return existing.id
+  }
+  const id = `mem_${nanoid(16)}`
+  db.prepare(
+    `INSERT INTO memories (id, user_id, key, value, source, created_at, updated_at) VALUES (?, ?, ?, ?, 'user', ?, ?)`,
+  ).run(id, userId, key, fact, stamp, stamp)
+  return id
 }
 
 router.post('/completions', async (req, res, next) => {
@@ -73,6 +101,11 @@ router.post('/completions', async (req, res, next) => {
        VALUES (?, ?, 'user', ?, 0, ?)`,
     ).run(userMsgId, conversationId, userMessage, stamp)
 
+    /* Teach-on-demand: save any "remember …" fact before we load memories, so it
+       is already in context for this very reply and every future chat. */
+    const factToRemember = detectRememberRequest(userMessage)
+    if (factToRemember) saveMemory(db, req.user.id, factToRemember, stamp)
+
     const history = db
       .prepare(
         `SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`,
@@ -88,7 +121,7 @@ router.post('/completions', async (req, res, next) => {
     const model = body.model || config.openaiModel
 
     if (body.stream === false) {
-      const result = await completeChat({ history, memories, model })
+      const result = await completeChat({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona })
       const assistantId = `msg_${nanoid(16)}`
       const doneAt = nowIso()
       db.prepare(
@@ -147,19 +180,50 @@ router.post('/completions', async (req, res, next) => {
     let usedModel = model
 
     try {
-      for await (const chunk of streamChatCompletion({ history, memories, model })) {
-        if (chunk.usage) usage = chunk.usage
-        if (chunk.model) usedModel = chunk.model
-        if (chunk.content) {
-          fullText += chunk.content
-          writeSse(res, {
-            id: completionId,
-            object: 'chat.completion.chunk',
-            created,
-            model: usedModel,
-            conversationId,
-            choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
-          })
+      /* Clear image requests are answered deterministically with a real picture
+         (no LLM round-trip, so the free-tier token limits can't block it). The
+         assistant also knows to emit an IMAGE: marker for subtler phrasings, which
+         the client renders — this path just makes the common case bulletproof. */
+      const imagePrompt = detectImageRequest(userMessage)
+      if (imagePrompt && isNsfwPrompt(imagePrompt)) {
+        /* Adult/NSFW requests are refused outright — Nexora is all-ages. We never
+           build a URL, so nothing inappropriate can reach the model or the UI. */
+        usedModel = 'nexora-image'
+        fullText = "🚫 Sorry, I can't generate that image — it looks like adult/NSFW content, and Nexora doesn't allow that. Describe a different, safe scene and I'll make it for you right away."
+        writeSse(res, {
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          model: usedModel,
+          conversationId,
+          choices: [{ index: 0, delta: { content: fullText }, finish_reason: null }],
+        })
+      } else if (imagePrompt) {
+        usedModel = 'nexora-image'
+        fullText = `🖼️ Here's your image.\n\n![Generated image](${buildImageUrl(imagePrompt)})`
+        writeSse(res, {
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          model: usedModel,
+          conversationId,
+          choices: [{ index: 0, delta: { content: fullText }, finish_reason: null }],
+        })
+      } else {
+        for await (const chunk of streamChatCompletion({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona })) {
+          if (chunk.usage) usage = chunk.usage
+          if (chunk.model) usedModel = chunk.model
+          if (chunk.content) {
+            fullText += chunk.content
+            writeSse(res, {
+              id: completionId,
+              object: 'chat.completion.chunk',
+              created,
+              model: usedModel,
+              conversationId,
+              choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
+            })
+          }
         }
       }
 

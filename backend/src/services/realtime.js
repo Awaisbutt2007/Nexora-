@@ -100,6 +100,15 @@ const PROVIDERS = {
         err.type = 'voice_unavailable'
         throw err
       }
+      /* Groq (gsk_ keys / groq.com base) speaks the OpenAI chat format but has NO
+         realtime voice endpoint, so a Groq key powers chat yet can never place a
+         call. Fail with a clear reason instead of a confusing provider 404. */
+      if (/^gsk_/.test(config.openaiApiKey) || /groq\.com/i.test(config.openaiBaseUrl)) {
+        const err = new Error('Voice calls need an OpenAI key (sk-…). The configured key is a Groq key — Groq powers text chat but does not support realtime voice. Add a funded OpenAI key to backend/.env to enable calls.')
+        err.status = 503
+        err.type = 'voice_unavailable'
+        throw err
+      }
       const res = await fetch(`${config.openaiBaseUrl.replace(/\/$/, '')}/realtime/client_secrets`, {
         method: 'POST',
         headers: {
