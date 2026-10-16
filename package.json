@@ -7,6 +7,8 @@
     "dev": "vite",
     "dev:api": "npm --prefix backend run dev",
     "start:api": "npm --prefix backend start",
+    "dev:agent": "npm --prefix desktop-agent run dev",
+    "start:agent": "npm --prefix desktop-agent start",
     "build": "vite build",
     "lint": "oxlint",
     "test": "npm --prefix backend test",

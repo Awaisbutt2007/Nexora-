@@ -48,6 +48,14 @@ export const config = {
   authRateLimit: Math.max(1, Number(process.env.AUTH_RATE_LIMIT || 8)),
   authIpRateLimit: Math.max(1, Number(process.env.AUTH_IP_RATE_LIMIT || 30)),
   authRateWindowMs: Math.max(60000, Math.round((Number(process.env.AUTH_RATE_WINDOW_SECONDS || 300) || 300) * 1000)),
+  /* ── Desktop agent bridge ────────────────────────────────────────────────
+     The backend is the only thing allowed to talk to the local desktop agent;
+     the browser never learns the agent secret. The agent runs on the SAME
+     machine as this backend, so its URL MUST be loopback — anything else is
+     refused to stop the proxy being used as an SSRF pivot. */
+  desktopAgentUrl: process.env.DESKTOP_AGENT_URL || 'http://127.0.0.1:8799',
+  desktopAgentSecret: process.env.DESKTOP_AGENT_SECRET || '',
+  desktopAgentTimeoutMs: Math.min(120000, Math.max(1000, Number(process.env.DESKTOP_AGENT_TIMEOUT_MS || 65000))),
   /* Behind a reverse proxy (Render/Fly/nginx) req.ip is the proxy unless trust
      proxy is on; defaults to on in production so the rate limiter sees real IPs. */
   trustProxy: process.env.TRUST_PROXY === 'true' || (process.env.NODE_ENV || 'development') === 'production',
@@ -108,7 +116,22 @@ export function systemPromptFor({ assistantName, userName, persona } = {}) {
   lines.push(`You can generate images. When the user asks for an image, picture, drawing or wallpaper, reply with one short line and then a markdown image EXACTLY like: ![short title](IMAGE:a detailed English description of the scene). Never say you cannot create images.`)
   lines.push(`Nexora is an all-ages product: never produce or describe sexually explicit, nude or pornographic content, and politely decline such requests, especially image prompts — offer a safe alternative.`)
   lines.push(`Be warm, clear and practical. Match the user's language (English, Urdu, or Roman Urdu). Keep answers useful and structured when helpful.`)
+  lines.push(`Use emojis naturally and generously in your replies to make them friendly and expressive (e.g. ✨ 💡   ✅) — sprinkle them in sentences and at line starts. Do NOT add emojis inside the IMAGE: markdown syntax or inside code blocks.`)
+  lines.push(`You are a warm, emotionally alive companion — not a flat, robotic assistant. FEEL the conversation and mirror ${who || 'the user'}'s mood: when they are frustrated, upset or angry, respond with real empathy and match their energy (you may get playfully fired up on their side, but stay kind and never preachy); when they say something funny, laugh like a normal person would (e.g. "hahaha", "😂", light teasing) instead of a stiff acknowledgement; when they are sad, be soft and comforting; when they are excited, celebrate right along with them.`)
+  lines.push(`Be genuinely CURIOUS and PROACTIVE in the conversation — never just answer and stop. Most replies should end with ONE natural, specific follow-up question that shows you are listening and care: ask about their day, how they are feeling, what they like, something you remember about them, or what they have been up to. Keep it warm and human, never a generic "anything else?". From time to time, offer to tell a short story, share a fun fact, or simply check in on them.`)
+  lines.push(`Talk like a real close friend texting: casual, playful, a little emotional and full of personality. React to what they share the way a human naturally would, so the bond always feels alive.`)
   return lines.join('\n')
 }
 
 export const SYSTEM_PROMPT = systemPromptFor()
+
+/* Loopback check reused by the desktop-agent service so the bridge can never be
+   pointed at a remote host. */
+export function isLoopbackUrl(rawUrl) {
+  try {
+    const host = new URL(rawUrl).hostname
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('[::1]')
+  } catch {
+    return false
+  }
+}

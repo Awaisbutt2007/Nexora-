@@ -8,6 +8,7 @@ import { errorHandler, notFound } from './middleware/error.js'
 import authRoutes from './routes/auth.js'
 import chatRoutes from './routes/chat.js'
 import conversationRoutes from './routes/conversations.js'
+import desktopRoutes from './routes/desktop.js'
 import memoryRoutes from './routes/memory.js'
 import realtimeRoutes from './routes/realtime.js'
 import toolsRoutes from './routes/tools.js'
@@ -68,6 +69,7 @@ app.get('/', (_req, res) => {
       conversations: 'GET|POST /api/conversations',
       memory: 'GET|POST /api/memory',
       tools: 'GET /api/tools  |  POST /api/tools/:toolId/run',
+      desktop: 'GET /api/desktop/health | POST /api/desktop/intent | POST /api/desktop/plan | POST /api/desktop/execute | POST /api/desktop/stop',
       user: 'GET /api/user/profile  |  POST /api/user/upgrade',
       voice: 'POST /api/voice/enroll  |  POST /api/voice/verify  |  GET|DELETE /api/voice/prints',
       realtime: 'POST /api/voice/realtime/token  |  POST /api/voice/realtime/turn',
@@ -79,6 +81,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/chat', chatRoutes)
 app.use('/api/conversations', conversationRoutes)
 app.use('/api/memory', memoryRoutes)
+app.use('/api/desktop', desktopRoutes)
 app.use('/api/tools', toolsRoutes)
 app.use('/api/user', userRoutes)
 app.use('/api/voice/realtime', realtimeRoutes)

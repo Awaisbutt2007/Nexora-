@@ -8,6 +8,7 @@ import AnimeEffects from './AnimeEffects.jsx'
 import {
   clearSession,
   deleteConversation,
+  deleteAllConversations,
   deleteMemory,
   getConversation,
   listConversations,
@@ -17,8 +18,19 @@ import {
   saveMemory,
   saveSession,
   streamChat,
+  proactiveChat,
   runTool,
   upgradePlan,
+  desktopAudit,
+  desktopApps,
+  desktopExecute,
+  desktopGrant,
+  desktopHealth,
+  desktopIntent,
+  desktopPermissions,
+  desktopPlan,
+  desktopRevoke,
+  desktopStop,
 } from './api/nexora.js'
 
 const ThreeHero = lazy(() => import('./ThreeHero.jsx'))
@@ -547,31 +559,138 @@ function loadChatDrawer() {
    everything else stays plain text. The backend emits ![cap](https://…image…)
    for detected image requests and the model's fallback uses ![cap](IMAGE:desc),
    which we resolve to the same keyless provider here — and refuse if adult. */
-const BLOCK_RE = /(```[\w+-]*\n?[\s\S]*?```|!\[[^\]]*\]\([^)]+\))/g
+/* A fenced block ends at its closing ``` OR at end-of-string, so a truncated or
+   still-streaming reply (model never emitted the closing fence) still renders as
+   a real code block with a copy button instead of leaking raw ``` markup. */
+const BLOCK_RE = /(```[^\n]*\n?[\s\S]*?(?:```|$)|!\[[^\]]*\]\([^)]+\))/g
 const IMAGE_TOKEN_RE = /!\[[^\]]*\]\(([^)]+)\)/
 /* Mirror of the backend NSFW gate so a model-authored IMAGE: marker can't slip an
    adult picture past the client either. */
 const CLIENT_NSFW = /(nude|naked|nsfw|porn|sex|sexy|erotic|xxx|boob|tit|penis|vagina|breast|nipple|anal|blowjob|orgasm|bikini|lingerie|topless|see[\s-]?through|onlyfans|hentai|chudai|chod|nangi|nanga|jism|shahwat|فحش|ننگی)/i
 const IMG_QUALITY = 'width=1024&height=1024&nologo=true&enhance=true&model=flux'
 
+/* Inline markdown → React nodes (auto-escaped, no dangerouslySetInnerHTML). Handles
+   `code`, **bold**, __bold__, *italic*, _italic_ and [label](http…) links. Only
+   http/https/mailto URLs become anchors, so a javascript: payload stays literal. */
+const INLINE_RE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*]+\*)|(_[^_]+_)|(\[[^\]]+\]\([^\s)]+\))/g
+function renderInline(text, base) {
+  if (!text) return []
+  const out = []
+  let last = 0
+  let n = 0
+  let m
+  INLINE_RE.lastIndex = 0
+  while ((m = INLINE_RE.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index))
+    const tok = m[0]
+    const key = `${base}-i${n++}`
+    if (tok[0] === '`') {
+      out.push(<code key={key} className="chat-inline-code">{tok.slice(1, -1)}</code>)
+    } else if (tok[0] === '[') {
+      const g = /^\[([^\]]+)\]\(([^\s)]+)\)$/.exec(tok)
+      const url = g ? g[2] : ''
+      if (g && /^(https?:|mailto:)/i.test(url)) out.push(<a key={key} href={url} target="_blank" rel="noopener noreferrer">{g[1]}</a>)
+      else out.push(tok)
+    } else {
+      const dbl = tok[0] === '*' ? tok[1] === '*' : tok[1] === '_'
+      out.push(dbl ? <strong key={key}>{tok.slice(2, -2)}</strong> : <em key={key}>{tok.slice(1, -1)}</em>)
+    }
+    last = m.index + tok.length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return out
+}
+
+/* Block markdown → paragraphs, # headings, - / * / • bullets, 1. numbered lists and
+   > quotes. A single newline inside a paragraph becomes <br>; a blank line splits
+   paragraphs. Code fences + images are already lifted out by renderChatContent. */
+const MD_H = /^(#{1,6})\s+(.*)$/
+const MD_UL = /^\s*[-*•]\s+(.*)$/
+const MD_OL = /^\s*\d+[.)]\s+(.*)$/
+const MD_BQ = /^\s*>\s?(.*)$/
+function renderMarkdown(text, base = 'md') {
+  if (!text) return []
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const blocks = []
+  let i = 0
+  let k = 0
+  let para = []
+  const flush = () => {
+    if (!para.length) return
+    const key = `${base}-p${k++}`
+    const nodes = []
+    para.forEach((ln, idx) => {
+      if (idx) nodes.push(<br key={`${key}-br${idx}`} />)
+      nodes.push(...renderInline(ln, `${key}-${idx}`))
+    })
+    blocks.push(<p key={key} className="chat-para">{nodes}</p>)
+    para = []
+  }
+  while (i < lines.length) {
+    const line = lines[i]
+    if (!line.trim()) { flush(); i++; continue }
+    let m
+    if ((m = MD_H.exec(line))) {
+      flush()
+      const key = `${base}-h${k++}`
+      blocks.push(<div key={key} className={`chat-h chat-h${Math.min(m[1].length, 4)}`}>{renderInline(m[2].trim(), key)}</div>)
+      i++
+      continue
+    }
+    if (MD_UL.test(line)) {
+      flush()
+      const key = `${base}-ul${k++}`
+      const items = []
+      let mm
+      while (i < lines.length && (mm = MD_UL.exec(lines[i]))) { items.push(mm[1]); i++ }
+      blocks.push(<ul key={key} className="chat-list">{items.map((it, idx) => <li key={`${key}-${idx}`}>{renderInline(it, `${key}-${idx}`)}</li>)}</ul>)
+      continue
+    }
+    if (MD_OL.test(line)) {
+      flush()
+      const key = `${base}-ol${k++}`
+      const items = []
+      let mm
+      while (i < lines.length && (mm = MD_OL.exec(lines[i]))) { items.push(mm[1]); i++ }
+      blocks.push(<ol key={key} className="chat-list">{items.map((it, idx) => <li key={`${key}-${idx}`}>{renderInline(it, `${key}-${idx}`)}</li>)}</ol>)
+      continue
+    }
+    if (MD_BQ.test(line)) {
+      flush()
+      const key = `${base}-bq${k++}`
+      const items = []
+      let mm
+      while (i < lines.length && (mm = MD_BQ.exec(lines[i]))) { items.push(mm[1]); i++ }
+      blocks.push(<blockquote key={key} className="chat-quote">{renderInline(items.join(' '), key)}</blockquote>)
+      continue
+    }
+    para.push(line)
+    i++
+  }
+  flush()
+  return blocks
+}
+
 function renderChatContent(text) {
   if (!text) return text
   const nodes = []
   let last = 0
   let n = 0
+  let t = 0
   let match
   BLOCK_RE.lastIndex = 0
   while ((match = BLOCK_RE.exec(text))) {
     if (match.index > last) {
       const seg = text.slice(last, match.index).replace(/^\n+/, '').replace(/\n+$/, '')
-      if (seg) nodes.push(seg)
+      if (seg) nodes.push(...renderMarkdown(seg, `t${t++}`))
     }
     const token = match[0]
     if (token.startsWith('```')) {
-      const inner = token.slice(3, -3)
+      /* Only strip a closing fence when one was actually emitted. */
+      const inner = token.endsWith('```') ? token.slice(3, -3) : token.slice(3)
       const nl = inner.indexOf('\n')
-      const lang = nl >= 0 ? inner.slice(0, nl).trim() : ''
-      const code = nl >= 0 ? inner.slice(nl + 1).replace(/\n$/, '') : inner
+      const lang = nl >= 0 ? inner.slice(0, nl).trim().split(/\s+/)[0] : ''
+      const code = (nl >= 0 ? inner.slice(nl + 1) : inner).replace(/\n+$/, '')
       nodes.push(<CodeBlock key={`code-${n++}`} lang={lang} code={code} />)
     } else {
       const m = IMAGE_TOKEN_RE.exec(token)
@@ -587,7 +706,10 @@ function renderChatContent(text) {
     }
     last = match.index + token.length
   }
-  if (last < text.length) nodes.push(text.slice(last))
+  if (last < text.length) {
+    const tail = text.slice(last)
+    if (tail.trim()) nodes.push(...renderMarkdown(tail, `t${t++}`))
+  }
   return nodes
 }
 
@@ -741,6 +863,249 @@ function ToolRunner({ entry, token, aiName, persona, isLoggedIn, onLogin, onCred
   )
 }
 
+/* The action catalog the Desktop view offers — mirrors desktop-agent/src/allowlist.js.
+   It is a convenience, not a permission: the agent re-validates every request
+   against the real allowlist and its own default-deny gate, so a stale entry here
+   can only produce a rejected preview, never an action the agent would allow. */
+const desktopActions = [
+  { id: 'browser.open', scope: 'browser', risk: 'low', example: { url: 'https://example.com' } },
+  { id: 'browser.search', scope: 'browser', risk: 'low', example: { engine: 'google', query: 'nexora docs' } },
+  { id: 'browser.snapshot', scope: 'browser', risk: 'low', example: { maxChars: 4000 } },
+  { id: 'browser.click', scope: 'browser', risk: 'medium', example: { selector: 'button', by: 'css' } },
+  { id: 'browser.fill', scope: 'browser', risk: 'medium', example: { selector: 'input[name=q]', value: 'hello', by: 'css' } },
+  { id: 'browser.submit', scope: 'browser', risk: 'high', confirm: true, example: { selector: 'button[type=submit]', by: 'css' } },
+  { id: 'browser.screenshot', scope: 'browser', risk: 'low', example: { name: 'aira-shot' } },
+  { id: 'apps.launch', scope: 'apps', risk: 'medium', example: { appId: 'chrome' } },
+  { id: 'apps.close', scope: 'apps', risk: 'medium', example: { appId: 'chrome' } },
+  { id: 'files.list', scope: 'files', risk: 'low', example: { dir: 'C:\\Nexora Sandbox' } },
+  { id: 'files.read', scope: 'files', risk: 'low', example: { path: 'C:\\Nexora Sandbox\\build.log' } },
+  { id: 'files.write', scope: 'files', risk: 'high', confirm: true, example: { path: 'C:\\Nexora Sandbox\\notes.txt', content: 'Created by Aira.' } },
+  { id: 'files.organize', scope: 'files', risk: 'high', confirm: true, example: { dir: 'C:\\Nexora Sandbox', strategy: 'by-extension', apply: false } },
+  { id: 'system.info', scope: 'system', risk: 'low', example: {} },
+  { id: 'system.restart', scope: 'system', risk: 'high', confirm: true, example: {} },
+  { id: 'system.shutdown', scope: 'system', risk: 'high', confirm: true, example: {} },
+]
+const desktopScopes = [['browser', '🌐', 'Drive the dedicated automation browser (not your personal profile)'], ['files', '🗂', 'Read / organize inside folders you approve'], ['apps', '🖥', 'Launch & close approved apps only'], ['system', '⚙', 'Read-only info; power needs per-action confirm, never from voice']]
+
+/* Aira acting on the local Windows PC through the hardened desktop agent.
+   Real connection only: if the backend bridge is disabled or the agent isn't
+   running we say so and block the controls — we never simulate a success. Every
+   request follows plan → visible preview → (scope +, for high-risk, an explicit
+   approve) → execute, exactly mirroring the agent's two-step gate. */
+function DesktopView({ token, aiName, isLoggedIn, onLogin }) {
+  const [tab, setTab] = useState('run')
+  const [health, setHealth] = useState(null)
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [command, setCommand] = useState('')
+  const [actionId, setActionId] = useState('browser.search')
+  const [argsText, setArgsText] = useState(() => JSON.stringify(desktopActions.find((a) => a.id === 'browser.search').example, null, 2))
+  const [plan, setPlan] = useState(null)
+  const [clarify, setClarify] = useState('')
+  const [result, setResult] = useState(null)
+  const [perms, setPerms] = useState(null)
+  const [apps, setApps] = useState(null)
+  const [dirDraft, setDirDraft] = useState('')
+  const [appDraft, setAppDraft] = useState('')
+  const [hostDraft, setHostDraft] = useState('')
+  const [audit, setAudit] = useState(null)
+
+  const enabled = health?.enabled === true
+
+  useEffect(() => {
+    if (!isLoggedIn || !token) return
+    let alive = true
+    desktopHealth(token).then((h) => { if (alive) setHealth(h) }).catch((err) => { if (alive) setHealth({ enabled: false, error: { message: err.message } }) })
+    return () => { alive = false }
+  }, [isLoggedIn, token])
+
+  function refreshPermissions() {
+    if (!isLoggedIn || !token) return
+    desktopPermissions(token).then(setPerms).catch((err) => setError(err.message))
+    desktopApps(token).then((r) => setApps(r.data || [])).catch(() => {})
+  }
+  function refreshAudit() {
+    if (!isLoggedIn || !token) return
+    desktopAudit(token).then((r) => setAudit(r.data || [])).catch((err) => setError(err.message))
+  }
+  function goTab(next) {
+    setTab(next); setError(''); setNotice('')
+    if (next === 'permissions') refreshPermissions()
+    if (next === 'audit') refreshAudit()
+  }
+
+  function pickAction(id) {
+    setActionId(id)
+    const a = desktopActions.find((x) => x.id === id)
+    if (a) setArgsText(JSON.stringify(a.example, null, 2))
+  }
+
+  async function runIntent() {
+    const text = command.trim()
+    if (!text) return
+    if (!isLoggedIn || !token) { onLogin(); return }
+    setBusy('planning'); setError(''); setNotice(''); setResult(null); setClarify(''); setPlan(null)
+    try {
+      const res = await desktopIntent(token, { utterance: text, fromVoice: false, assistantName: aiName })
+      if (res.kind === 'plan') setPlan(res.plan)
+      else setClarify(res.clarify || 'I could not turn that into one safe action — try being more specific.')
+    } catch (err) { setError(err.message) } finally { setBusy('') }
+  }
+
+  async function planManual() {
+    if (!isLoggedIn || !token) { onLogin(); return }
+    let args
+    try { args = argsText.trim() ? JSON.parse(argsText) : {} } catch { setError('Arguments must be valid JSON.'); return }
+    setBusy('planning'); setError(''); setNotice(''); setResult(null); setClarify(''); setPlan(null)
+    try {
+      const p = await desktopPlan(token, { action: actionId, args, context: { fromVoice: false } })
+      setPlan(p)
+    } catch (err) { setError(err.message) } finally { setBusy('') }
+  }
+
+  async function approveAndRun() {
+    if (!plan || !plan.planId) return
+    if (!isLoggedIn || !token) { onLogin(); return }
+    setBusy('running'); setError(''); setNotice('')
+    try {
+      const r = await desktopExecute(token, { planId: plan.planId, approvedThisAction: true })
+      setResult(r); setPlan(null)
+      if (r.ok === false) setError(r.reason || `Blocked by the agent (${r.status}).`)
+    } catch (err) { setError(err.message) } finally { setBusy('') }
+  }
+
+  async function doStop() {
+    if (!isLoggedIn || !token) return
+    setBusy('stopping'); setError('')
+    try { const r = await desktopStop(token); setNotice(`🛑 Stop sent — ${r.cancelled ?? 0} running action(s) cancelled.`) }
+    catch (err) { setError(err.message) } finally { setBusy('') }
+  }
+
+  async function mutatePerms(fn, label, after) {
+    if (!isLoggedIn || !token) { onLogin(); return }
+    setBusy(label); setError(''); setNotice('')
+    try { const r = await fn(); if (r.permissions) setPerms(r.permissions); setNotice(`${label} ✓`); if (after) after() }
+    catch (err) { setError(err.message) } finally { setBusy('') }
+  }
+
+  if (!isLoggedIn || !token) {
+    return <section className="workspace-page-panel desktop-panel">
+      <div className="settings-icon">🖥</div>
+      <h2>Desktop actions</h2>
+      <p>{aiName} can open apps, browse and organize files on this PC — but only while you're signed in, and only for actions you explicitly approve.</p>
+      <button type="button" className="tool-runner-run" onClick={onLogin}>Sign in to connect</button>
+    </section>
+  }
+
+  return <section className="workspace-page-panel desktop-panel">
+    <div className="desktop-head">
+      <div><h2>Desktop actions</h2><p>{aiName} proposes an action, you preview and approve it. The agent — not the model — decides what's allowed.</p></div>
+      <button type="button" className="desktop-stop" onClick={doStop} disabled={busy === 'stopping'}>🛑 Stop</button>
+    </div>
+
+    <div className={`desktop-status${enabled ? ' is-ok' : ' is-off'}`}>
+      {health == null && <span>Checking for the desktop agent on your PC…</span>}
+      {health && enabled && <span>● Connected — {health.agent?.bind || '127.0.0.1'} · loopback only. Automation browser, approved apps and folders only.</span>}
+      {health && !enabled && <span>○ Desktop bridge is OFF — {health.error?.message ? health.error.message + '. ' : 'no DESKTOP_AGENT_SECRET is set, or the agent is not running. '}Set the secret in backend/.env and start it with <code>npm run dev:agent</code>, then reload.</span>}
+    </div>
+
+    <div className="desktop-tabs">{[['run', 'Run'], ['permissions', 'Permissions'], ['audit', 'Audit log']].map(([id, label]) => <button type="button" key={id} className={`desktop-tab${tab === id ? ' selected' : ''}`} onClick={() => goTab(id)}>{label}</button>)}</div>
+
+    {error && <div className="tool-runner-error" role="alert">⚠️ {error}</div>}
+    {notice && <div className="desktop-notice" role="status">{notice}</div>}
+
+    {tab === 'run' && <div className="desktop-run">
+      <div className="desktop-card">
+        <label className="desktop-label" htmlFor="desktop-cmd">Ask in plain words</label>
+        <textarea id="desktop-cmd" className="tool-runner-input" rows={2} placeholder="e.g. open the automation browser and search for React docs" value={command} onChange={(event) => setCommand(event.target.value)} disabled={busy !== ''} />
+        <div className="desktop-row"><button type="button" className="tool-runner-run" onClick={runIntent} disabled={busy !== '' || !command.trim()}>Plan this</button></div>
+      </div>
+
+      <div className="desktop-card">
+        <label className="desktop-label" htmlFor="desktop-action">…or build the action directly</label>
+        <select id="desktop-action" className="desktop-select" value={actionId} onChange={(event) => pickAction(event.target.value)}>{desktopActions.map((a) => <option key={a.id} value={a.id}>{a.id}{a.confirm ? '  ⚠ confirm' : ''} · {a.scope}</option>)}</select>
+        <label className="desktop-label" htmlFor="desktop-args">Arguments (JSON)</label>
+        <textarea id="desktop-args" className="tool-runner-input desktop-args" rows={6} value={argsText} onChange={(event) => setArgsText(event.target.value)} spellCheck={false} disabled={busy !== ''} />
+        <div className="desktop-row"><button type="button" className="tool-runner-run" onClick={planManual} disabled={busy !== ''}>Preview action</button></div>
+      </div>
+
+      {clarify && <div className="desktop-clarify">❓ {clarify}</div>}
+
+      {plan && (plan.ok ?
+        <div className="desktop-plan">
+          <div className="desktop-plan-head"><strong>{plan.action}</strong><span className={`desktop-risk risk-${plan.risk}`}>{plan.risk}</span><span className="desktop-scope-chip">{plan.scope}</span></div>
+          <p className="desktop-preview">{plan.preview}</p>
+          {plan.needsScope && <p className="desktop-warn">🔒 Needs the “{plan.needsScope}” permission first — <button type="button" className="desktop-link" onClick={() => goTab('permissions')}>open Permissions</button> to grant it, then preview again.</p>}
+          {plan.needsConfirm && <p className="desktop-warn">⚠ High-risk / irreversible — “Approve & run” is your explicit confirmation.</p>}
+          <div className="desktop-row">
+            <button type="button" className="desktop-cancel" onClick={() => setPlan(null)}>Cancel</button>
+            <button type="button" className="desktop-approve" onClick={approveAndRun} disabled={busy !== '' || Boolean(plan.needsScope)}>{busy === 'running' ? 'Running…' : 'Approve & run'}</button>
+          </div>
+        </div>
+      : <div className="desktop-plan is-rejected"><strong>Agent rejected the request</strong><p>{plan.reason || 'It does not match the allowlist.'}</p>{Array.isArray(plan.issues) && plan.issues.length ? <ul className="desktop-issues">{plan.issues.map((issue, n) => <li key={n}>{issue.path}: {issue.message}</li>)}</ul> : null}</div>)}
+
+      {result && <div className="desktop-result">
+        <div className="desktop-plan-head"><strong>{result.ok ? `✓ ${result.action}` : `✕ ${result.status || 'blocked'}`}</strong></div>
+        {result.ok === false ? <p className="desktop-warn">{result.reason || 'Not executed.'}</p>
+          : <pre className="desktop-result-json">{JSON.stringify(result.result, null, 2)}</pre>}
+      </div>}
+    </div>}
+
+    {tab === 'permissions' && <div className="desktop-perms">
+      <p className="desktop-muted">Default-deny. Nothing runs until you switch a scope on, and destructive actions STILL ask every single time.</p>
+      <div className="desktop-scopes">{desktopScopes.map(([scope, icon, desc]) => {
+        const granted = perms?.scopes?.[scope] === true
+        return <div className={`desktop-scope${granted ? ' is-on' : ''}`} key={scope}>
+          <div className="desktop-scope-main"><span className="showcase-icon">{icon}</span><div><strong>{scope}</strong><small>{desc}</small></div></div>
+          {granted
+            ? <button type="button" className="desktop-link danger" onClick={() => mutatePerms(() => desktopRevoke(token, { scope }), `Revoked ${scope}`)}>Revoke</button>
+            : <button type="button" className="desktop-link" onClick={() => mutatePerms(() => desktopGrant(token, { scope }), `Granted ${scope}`)}>Grant</button>}
+        </div>
+      })}</div>
+
+      <div className="desktop-card">
+        <label className="desktop-label" htmlFor="desktop-dir">Approved folders — file actions are limited to these</label>
+        <ul className="desktop-list">{(perms?.allowedDirs || []).length ? perms.allowedDirs.map((d) => <li key={d}><code>{d}</code><button type="button" className="desktop-link danger" onClick={() => mutatePerms(() => desktopRevoke(token, { allowedDir: d }), 'Folder removed', refreshPermissions)}>Remove</button></li>) : <li className="desktop-none">None yet — files.* actions will be denied.</li>}</ul>
+        <div className="desktop-inline"><input id="desktop-dir" className="tool-runner-input desktop-field" type="text" placeholder="C:\\Path\\To\\Sandbox" value={dirDraft} onChange={(event) => setDirDraft(event.target.value)} /><button type="button" className="desktop-link" onClick={() => { const d = dirDraft.trim(); if (d) mutatePerms(() => desktopGrant(token, { allowedDir: d }), 'Folder approved', () => setDirDraft('')) }}>Add</button></div>
+      </div>
+
+      <div className="desktop-card">
+        <label className="desktop-label">Approved apps</label>
+        <ul className="desktop-list">{(apps || []).length ? (apps || []).map((a) => <li key={a.id}><code>{a.id}</code> <span className="desktop-muted">{a.label}{a.resolved ? '' : ' · not installed here'}</span></li>) : <li className="desktop-none">None reported by the agent.</li>}</ul>
+        <div className="desktop-inline"><input className="tool-runner-input desktop-field" type="text" placeholder="app id (e.g. chrome)" value={appDraft} onChange={(event) => setAppDraft(event.target.value)} /><button type="button" className="desktop-link" onClick={() => { const v = appDraft.trim(); if (v) mutatePerms(() => desktopGrant(token, { approvedAppId: v }), 'App approved', () => setAppDraft('')) }}>Add</button></div>
+      </div>
+
+      <div className="desktop-card">
+        <label className="desktop-label">Allowed browser hosts (empty = the agent's env default)</label>
+        <ul className="desktop-list">{(perms?.allowedHosts || []).length ? perms.allowedHosts.map((h) => <li key={h}><code>{h}</code></li>) : <li className="desktop-none">No per-host allowlist set.</li>}</ul>
+        <div className="desktop-inline"><input className="tool-runner-input desktop-field" type="text" placeholder="example.com" value={hostDraft} onChange={(event) => setHostDraft(event.target.value)} /><button type="button" className="desktop-link" onClick={() => { const v = hostDraft.trim(); if (v) mutatePerms(() => desktopGrant(token, { allowedHost: v }), 'Host allowed', () => setHostDraft('')) }}>Add</button></div>
+      </div>
+    </div>}
+
+    {tab === 'audit' && <div className="desktop-audit">
+      <div className="desktop-row"><button type="button" className="desktop-link" onClick={refreshAudit}>Refresh</button><span className="desktop-muted">Secrets, file bodies and form values are redacted at the source.</span></div>
+      {(audit || []).length === 0 ? <p className="desktop-none">Nothing recorded yet.</p>
+        : <ul className="desktop-audit-list">{audit.map((entry, n) => <li key={n}><span className="desktop-audit-time">{new Date(entry.ts).toLocaleTimeString()}</span><code className="desktop-audit-event">{entry.event || entry.action}</code>{entry.status ? <span className="desktop-scope-chip">{entry.status}</span> : null}{entry.reason ? <span className="desktop-muted"> — {entry.reason}</span> : null}</li>)}</ul>}
+    </div>}
+  </section>
+}
+
+/* Starter prompts shown on the chat home hero. Clicking one sends the message
+   immediately — no need to press Enter or the send button afterwards. */
+const chatStarters = [
+  { icon: '💡', label: 'Explain something in simple words' },
+  { icon: '✏️', label: 'Help me with my work' },
+  { icon: '🧠', label: 'Remember my preferences' },
+  { icon: '✨', label: 'Just have a conversation' },
+]
+
+/* Small clock shown under each chat turn, matching the reference layout. */
+const formatChatTime = (ts) => {
+  const d = new Date(ts)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
 function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, isLoggedIn, userProfile, authToken, onLogin, onLogout, onUpgrade, onProfileUpdate }) {
   const [prompt, setPrompt] = useState('')
   const [conversationId, setConversationId] = useState(null)
@@ -750,6 +1115,13 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
   const [accountDrawerOpen, setAccountDrawerOpen] = useState(false)
   const chatEndRef = useRef(null)
+  /* Aira sometimes starts the conversation herself: if the user goes quiet mid-chat,
+     ask the backend for one short check-in. The idle clock and a once-per-pause guard
+     live in refs so the interval below never re-subscribes on every keystroke. */
+  const lastActivityRef = useRef(Date.now())
+  const proactiveBusyRef = useRef(false)
+  const messagesRef = useRef(messages)
+  const streamingRef = useRef(streaming)
 
   /* Right-side chat drawer: open by default, pin to keep it, drag the edge to resize */
   const [chatOpen, setChatOpen] = useState(true)
@@ -775,6 +1147,8 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   /* Saved conversations (text + voice share one history — same `conversations` table) */
   const [conversations, setConversations] = useState([])
   const [convLoading, setConvLoading] = useState(false)
+  const [historyQuery, setHistoryQuery] = useState('')
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
 
   const userName = userProfile?.name || 'Guest'
   const userEmail = userProfile?.email || 'Sign in to sync'
@@ -789,6 +1163,11 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   const view = activeView === 'Home' ? 'Chat' : activeView
   /* Which tool card is open in the Tools view (matched by its display title). */
   const selectedEntry = tools.find((t) => t[1] === selectedTool) || null
+  /* History search: case-insensitive title filter over the already-loaded list. */
+  const historyTerm = historyQuery.trim().toLowerCase()
+  const visibleConversations = historyTerm
+    ? conversations.filter((c) => String(c.title).toLowerCase().includes(historyTerm))
+    : conversations
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -797,6 +1176,35 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   useEffect(() => {
     drawerEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [drawerMessages, drawerStreaming])
+
+  /* Keep refs pointed at the latest thread so the idle interval can read them
+     without re-subscribing on every render. */
+  useEffect(() => { messagesRef.current = messages }, [messages])
+  useEffect(() => { streamingRef.current = streaming }, [streaming])
+
+  /* Idle check-in: once the user has been silent for ~45s on an open thread whose last
+     turn is Aira's, she reaches out first — at most once, until the user replies again. */
+  useEffect(() => {
+    if (!isLoggedIn || !authToken || view !== 'Chat' || !conversationId) return
+    const IDLE_PROACTIVE_MS = 45000
+    const tick = setInterval(() => {
+      if (document.hidden || streamingRef.current || proactiveBusyRef.current) return
+      if (Date.now() - lastActivityRef.current < IDLE_PROACTIVE_MS) return
+      const last = messagesRef.current[messagesRef.current.length - 1]
+      if (!last || last.role !== 'assistant' || last.streaming) return
+      proactiveBusyRef.current = true
+      proactiveChat({ token: authToken, conversationId, assistantName: aiName, persona: voicePrefs.persona })
+        .then((r) => {
+          const content = (r?.content || '').trim()
+          if (content) {
+            setMessages((prev) => [...prev, { id: `local_proactive_${Date.now()}`, role: 'assistant', content, ts: Date.now() }])
+            setNotice(`${aiName} checked in.`)
+          }
+        })
+        .catch(() => { /* best-effort — never surface a proactive failure to the user */ })
+    }, 6000)
+    return () => clearInterval(tick)
+  }, [isLoggedIn, authToken, view, conversationId, aiName, voicePrefs.persona])
 
   /* Drag the drawer's left edge to make it wider or narrower (kam/zyada) */
   useEffect(() => {
@@ -841,6 +1249,8 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     setConversationId(null)
     setMessages([])
     setActiveView('Chat')
+    lastActivityRef.current = Date.now()
+    proactiveBusyRef.current = false
     setNotice('New chat ready.')
   }
 
@@ -876,7 +1286,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
 
   useEffect(() => {
     if (activeView !== 'History' || !isLoggedIn || !authToken) return undefined
-    const id = setTimeout(refreshConversations, 0)
+    const id = setTimeout(() => { setConfirmDeleteAll(false); refreshConversations() }, 0)
     return () => clearTimeout(id)
   }, [activeView, isLoggedIn, authToken, refreshConversations])
 
@@ -885,8 +1295,10 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     getConversation(authToken, id)
       .then((convo) => {
         setConversationId(convo.id)
-        setMessages((convo.messages || []).map((m) => ({ id: m.id, role: m.role, content: m.content })))
+        setMessages((convo.messages || []).map((m) => ({ id: m.id, role: m.role, content: m.content, ts: m.createdAt ? new Date(m.createdAt).getTime() : null })))
         setActiveView('Chat')
+        lastActivityRef.current = Date.now()
+        proactiveBusyRef.current = false
         setNotice(`Opened “${convo.title}”.`)
       })
       .catch((err) => setNotice(err.message || 'Could not open that conversation.'))
@@ -902,6 +1314,20 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         setNotice('Conversation deleted.')
       })
       .catch((err) => setNotice(err.message || 'Could not delete conversation.'))
+  }
+
+  /* Wipe every saved thread for this user (the backend clears only their rows). */
+  function removeAllConversations() {
+    deleteAllConversations(authToken)
+      .then(() => {
+        setConversations([])
+        setConversationId(null)
+        setMessages([])
+        setHistoryQuery('')
+        setConfirmDeleteAll(false)
+        setNotice('All conversations deleted.')
+      })
+      .catch((err) => setNotice(err.message || 'Could not delete conversations.'))
   }
 
   function submitMemory(event) {
@@ -927,9 +1353,9 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       .catch((err) => setNotice(err.message || 'Could not delete memory.'))
   }
 
-  async function sendPrompt(event) {
-    event.preventDefault()
-    const cleanPrompt = prompt.trim()
+  async function sendPrompt(event, overrideText) {
+    if (event) event.preventDefault()
+    const cleanPrompt = (typeof overrideText === 'string' ? overrideText : prompt).trim()
     if (!cleanPrompt || streaming) return
 
     if (!isLoggedIn || !authToken) {
@@ -938,13 +1364,15 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     }
 
     setActiveView('Chat')
+    lastActivityRef.current = Date.now()
+    proactiveBusyRef.current = false
     setPrompt('')
     const tempUserId = `local_user_${Date.now()}`
     const tempAsstId = `local_asst_${Date.now()}`
     setMessages((prev) => [
       ...prev,
-      { id: tempUserId, role: 'user', content: cleanPrompt },
-      { id: tempAsstId, role: 'assistant', content: '', streaming: true },
+      { id: tempUserId, role: 'user', content: cleanPrompt, ts: Date.now() },
+      { id: tempAsstId, role: 'assistant', content: '', streaming: true, ts: Date.now() },
     ])
     setStreaming(true)
 
@@ -985,6 +1413,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       setNotice(err.message || 'Chat failed — is the backend running on :8787?')
     } finally {
       setStreaming(false)
+      lastActivityRef.current = Date.now()
     }
   }
 
@@ -1052,7 +1481,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         {/* Primary workspace nav. The bottom mobile-workspace-nav is display:none and
            the old dock was removed (its Memory/Settings live in the account drawer),
            so Chat/History/Tools are otherwise unreachable — expose them here. */}
-        <nav className="workspace-nav" aria-label="Workspace navigation">{['Chat', 'History', 'Tools'].map((label) => <button type="button" key={label} className={`workspace-nav-btn${view === label ? ' selected' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => setActiveView(label)}>{label}</button>)}</nav>
+        <nav className="workspace-nav" aria-label="Workspace navigation">{['Chat', 'History', 'Tools', 'Desktop'].map((label) => <button type="button" key={label} className={`workspace-nav-btn${view === label ? ' selected' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => setActiveView(label)}>{label}</button>)}</nav>
         <div className="workspace-actions">
           <button
             className="header-voice-btn"
@@ -1164,46 +1593,85 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         </div>
       </header>
       <div className="workspace-content" key={view}>
-        {view === 'Chat' && <section className="workspace-page-panel chat-page">
+        {view === 'Chat' && <section className={`workspace-page-panel chat-page${messages.length ? ' has-thread' : ''}`}>
           {messages.length === 0 ? (
-            <div className="chat-empty">
-              <span className="chat-orb">✦</span>
-              <h2>Hi, I’m {aiName}.</h2>
-              <p>What can I help you think through today?</p>
-              <div>{['Explain a concept', 'Write a first draft', 'Plan my day'].map((item) => (
-                <button type="button" key={item} onClick={() => setPrompt(item)}>{item}</button>
-              ))}</div>
-              <button type="button" className="chat-new-thread" onClick={startNewChat}>Start a new thread</button>
-            </div>
-          ) : (
-            <div className="chat-thread" role="log" aria-live="polite">
-              {messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => (
-                <div key={m.id} className={`chat-bubble ${m.role}${m.error ? ' chat-error' : ''}`}>
-                  <span className="chat-bubble-label">{m.role === 'user' ? 'You' : aiName}</span>
-                  <div className="chat-text">{renderChatContent(m.content) || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</div>
+            <>
+              <div className="chat-hero">
+                <div className="chat-hero-orbwrap" aria-hidden="true">
+                  <svg className="chat-hero-waves" viewBox="0 0 420 120" preserveAspectRatio="none"><path d="M0 60 Q 105 8 210 60 T 420 60" /><path d="M0 60 Q 105 112 210 60 T 420 60" /></svg>
+                  <span className="chat-hero-orb"><i>✦</i></span>
                 </div>
-              ))}
-              <div ref={chatEndRef} />
+                <h1 className="chat-hero-title">Hello <span className="chat-hero-name">{userName}</span></h1>
+                <p className="chat-hero-sub">I’m {aiName} — your AI companion.<br />Ask me anything, I’m here to help.</p>
+                <div className="chat-hero-starters">{chatStarters.map((s) => (
+                  <button type="button" key={s.label} onClick={() => sendPrompt(null, s.label)}><span aria-hidden="true">{s.icon}</span>{s.label}</button>
+                ))}</div>
+              </div>
+              <span className="chat-hero-corner" aria-hidden="true">{aiName} · Personal · Always With You</span>
+              <span className="chat-hero-online" aria-hidden="true"><i />{aiName} is online</span>
+              <div className="chat-hero-bond" aria-hidden="true"><b>YOU</b><span>+</span><em>{aiName}</em><u>∞</u></div>
+            </>
+          ) : (
+            <div className="chat-body">
+              <div className="chat-thread-bar">
+                <span className="chat-thread-title">{aiName}<b className="chat-thread-dot" aria-hidden="true" /></span>
+                <button type="button" className="chat-new-thread" onClick={startNewChat}>＋ New chat</button>
+              </div>
+              <div className="chat-thread chat-thread-in" role="log" aria-live="polite">
+                {messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m, i) => {
+                  /* One flex ROW per turn (avatar + bubble) so turns can never
+                     overlap — the old align-self bubbles risked exactly that. */
+                  const mine = m.role === 'user'
+                  const initial = (mine ? userName : aiName).trim().charAt(0).toUpperCase() || (mine ? 'U' : 'A')
+                  return (
+                    <div key={m.id} className={`chat-msg${mine ? ' mine' : ''}${m.error ? ' is-error' : ''}`} style={{ '--i': Math.min(i, 12) }}>
+                      <span className="chat-msg-avatar" aria-hidden="true">{mine ? initial : '✦'}</span>
+                      <div className="chat-msg-main">
+                        <span className="chat-msg-name">{mine ? 'You' : aiName}</span>
+                        <div className="chat-msg-bubble">
+                          <div className="chat-text">{renderChatContent(m.content) || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</div>
+                        </div>
+                        {m.ts ? <span className="chat-msg-time">{formatChatTime(m.ts)}</span> : null}
+                      </div>
+                    </div>
+                  )
+                })}
+                <div ref={chatEndRef} />
+              </div>
             </div>
           )}
           <form className="prompt-box" onSubmit={sendPrompt}>
+            <span className="prompt-box-spark" aria-hidden="true">✦</span>
             <label className="sr-only" htmlFor="chat-prompt">Type your message</label>
             <input id="chat-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={streaming ? `${aiName} is typing…` : 'Type your message...'} autoComplete="off" disabled={streaming} />
-            <button type="submit" aria-label="Send message" disabled={streaming || !prompt.trim()}>→</button>
+            <button type="submit" aria-label="Send message" disabled={streaming || !prompt.trim()}>➤</button>
           </form>
         </section>}
         {view === 'Tools' && <div className="workspace-page-panel">
           <div className="workspace-tool-grid">{tools.map(([icon, title, description, tint]) => <button className={`workspace-tool tint-${tint} ${selectedTool === title ? 'tool-highlighted' : ''}`} type="button" key={title} onClick={() => { setSelectedTool(title); setNotice(`${title} ready — describe what you need below.`) }}><span className="showcase-icon">{icon}</span><strong>{title}</strong><small>{description}</small><b>{selectedTool === title ? 'Selected ✓' : 'Open tool →'}</b></button>)}</div>
           {selectedEntry && <ToolRunner key={selectedEntry[1]} entry={selectedEntry} token={authToken} aiName={aiName} persona={voicePrefs.persona} isLoggedIn={isLoggedIn} onLogin={onLogin} onCredits={onProfileUpdate} />}
         </div>}
+        {view === 'Desktop' && <DesktopView token={authToken} aiName={aiName} isLoggedIn={isLoggedIn} onLogin={onLogin} />}
         {view === 'History' && <section className="workspace-page-panel history-panel">
           <div className="settings-icon">⧗</div>
           <h2>Every chat, text and voice, in one place.</h2>
           <p>Aira keeps spoken calls in the same thread list as your typed chats. Open one to continue where you left off, or delete it — the transcript goes with it.</p>
           {!isLoggedIn ? <p className="history-empty">Sign in to see your saved conversations.</p> : <>
+            {conversations.length > 0 && <div className="history-toolbar">
+              <label className="history-search">
+                <span aria-hidden="true">⌕</span>
+                <input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" autoComplete="off" />
+              </label>
+              {confirmDeleteAll ? <div className="history-confirm" role="group" aria-label="Confirm delete all">
+                <span>Delete all {conversations.length}?</span>
+                <button type="button" className="history-confirm-yes" onClick={removeAllConversations}>Yes, delete all</button>
+                <button type="button" className="history-confirm-no" onClick={() => setConfirmDeleteAll(false)}>Cancel</button>
+              </div> : <button type="button" className="history-clear-all" onClick={() => setConfirmDeleteAll(true)}>Delete all</button>}
+            </div>}
             {convLoading && <p className="history-empty">Loading…</p>}
             {!convLoading && conversations.length === 0 && <p className="history-empty">Nothing saved yet. Start a chat or a Talk call and it will show up here.</p>}
-            <ul className="history-list">{conversations.map((c) => <li key={c.id}>
+            {!convLoading && conversations.length > 0 && visibleConversations.length === 0 && <p className="history-empty">No conversations match “{historyQuery.trim()}”.</p>}
+            <ul className="history-list">{visibleConversations.map((c) => <li key={c.id}>
               <button type="button" className="history-open" onClick={() => openConversation(c.id)}>
                 <strong>{c.title}</strong>
                 <small>{new Date(c.updatedAt).toLocaleString()} · {c.model || 'chat'}</small>

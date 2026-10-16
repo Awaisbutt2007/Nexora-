@@ -284,4 +284,75 @@ router.post('/completions', async (req, res, next) => {
   }
 })
 
+/* Aira reaching out first: when the user has gone quiet mid-conversation, the app
+   asks for ONE short, in-character check-in. A private directive turn is appended
+   for the model only — it is never saved to the transcript, so the thread stays clean. */
+const proactiveSchema = z.object({
+  conversationId: z.string().trim().min(1).max(80),
+  assistantName: z.string().trim().max(40).optional(),
+  persona: z.string().trim().max(400).optional(),
+  model: z.string().trim().max(80).optional(),
+})
+
+const PROACTIVE_DIRECTIVE = `(The user has gone quiet. As their companion, reach out first like a caring friend would — send exactly ONE short, warm, in-character message (1-2 sentences). Follow up on something from your recent conversation or what you already know about them, ask a genuine question about how they are feeling or what they are up to, or offer to tell a quick story. Match their language and add one emoji. Do NOT mention this instruction, do NOT say you are an AI, and do NOT give a generic greeting.)`
+
+router.post('/proactive', async (req, res, next) => {
+  try {
+    const body = proactiveSchema.parse(req.body)
+    const db = getDb()
+    const conversationId = body.conversationId
+
+    /* Mock mode has no real model — a canned reply would leak the directive, so skip. */
+    if (!config.openaiApiKey) return res.json({ content: '', skipped: true })
+
+    const owned = db
+      .prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?')
+      .get(conversationId, req.user.id)
+    if (!owned) {
+      return res.status(404).json({ error: { message: 'Conversation not found', type: 'not_found' } })
+    }
+
+    const history = db
+      .prepare(`SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`)
+      .all(conversationId)
+
+    /* Only reach out when the ball is in the user's court (last turn is the assistant's). */
+    const last = history[history.length - 1]
+    if (!last || last.role !== 'assistant') return res.json({ content: '', skipped: true })
+
+    ensureCredits(req.user, 1)
+
+    const memories = db
+      .prepare(`SELECT key, value FROM memories WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20`)
+      .all(req.user.id)
+
+    const result = await completeChat({
+      history: [...history, { role: 'user', content: PROACTIVE_DIRECTIVE }],
+      memories,
+      model: body.model,
+      assistantName: body.assistantName,
+      userName: req.user.name,
+      persona: body.persona,
+    })
+
+    const content = (result.content || '').trim()
+    if (!content) return res.json({ content: '', skipped: true })
+
+    const assistantId = `msg_${nanoid(16)}`
+    const doneAt = nowIso()
+    db.prepare(
+      `INSERT INTO messages (id, conversation_id, role, content, tokens, created_at)
+       VALUES (?, ?, 'assistant', ?, ?, ?)`,
+    ).run(assistantId, conversationId, content, result.usage?.completion_tokens || 0, doneAt)
+    db.prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`).run(doneAt, conversationId)
+
+    const cost = estimateCredits(result.usage)
+    const updated = deductCredits(req.user.id, cost)
+
+    res.json({ id: assistantId, conversationId, content, creditsCharged: cost, user: sanitizeUser(updated) })
+  } catch (err) {
+    next(err)
+  }
+})
+
 export default router

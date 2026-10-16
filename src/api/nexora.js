@@ -119,6 +119,11 @@ export async function deleteConversation(token, id) {
   return parseJson(res)
 }
 
+export async function deleteAllConversations(token) {
+  const res = await fetch(`${API_BASE}/api/conversations`, { method: 'DELETE', headers: authHeaders(token) })
+  return parseJson(res)
+}
+
 export async function upgradePlan(token, plan = 'pro') {
   const res = await fetch(`${API_BASE}/api/user/upgrade`, {
     method: 'POST',
@@ -192,6 +197,20 @@ export async function streamChat({ token, message, conversationId = null, assist
   return { conversationId: resolvedConversationId, fullText }
 }
 
+/**
+ * Ask Aira to reach out first with one short, in-character check-in when the user
+ * has gone quiet. Best-effort: returns { content, skipped } — empty content means
+ * there was nothing to send (mock mode, or the last turn wasn't the assistant's).
+ */
+export async function proactiveChat({ token, conversationId, assistantName, persona }) {
+  const res = await fetch(`${API_BASE}/api/chat/proactive`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ conversationId, assistantName, persona }),
+  })
+  return parseJson(res)
+}
+
 async function parseJson(res) {
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
@@ -244,6 +263,74 @@ export async function saveMemory(token, { key, value, source }) {
 export async function deleteMemory(token, id) {
   const res = await fetch(`${API_BASE}/api/memory/${id}`, { method: 'DELETE', headers: authHeaders(token) })
   if (res.status === 204) return { ok: true }
+  return parseJson(res)
+}
+
+/**
+ * Desktop agent bridge — Aira acting on your own Windows PC.
+ * Every call goes to the authenticated backend proxy (/api/desktop/*) with the
+ * user's JWT. The browser NEVER learns the agent's shared secret and never opens
+ * a socket to the agent directly; the backend is the only allowed caller and it
+ * only ever targets a loopback URL. When the bridge is disabled or the agent
+ * isn't running the backend returns a clear error, which we surface here — we
+ * never fake a successful desktop action.
+ */
+export async function desktopHealth(token) {
+  const res = await fetch(`${API_BASE}/api/desktop/health`, { headers: authHeaders(token) })
+  const data = await res.json().catch(() => ({}))
+  // health is allowed to return { enabled:false, error:{…} } on a 5xx — don't throw
+  return { ok: res.ok, ...data }
+}
+
+export async function desktopPermissions(token) {
+  const res = await fetch(`${API_BASE}/api/desktop/permissions`, { headers: authHeaders(token) })
+  return parseJson(res)
+}
+
+export async function desktopApps(token) {
+  const res = await fetch(`${API_BASE}/api/desktop/apps`, { headers: authHeaders(token) })
+  return parseJson(res)
+}
+
+export async function desktopGrant(token, payload) {
+  const res = await fetch(`${API_BASE}/api/desktop/permissions/grant`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(payload) })
+  return parseJson(res)
+}
+
+export async function desktopRevoke(token, payload) {
+  const res = await fetch(`${API_BASE}/api/desktop/permissions/revoke`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(payload) })
+  return parseJson(res)
+}
+
+export async function desktopIntent(token, { utterance, fromVoice = false, assistantName } = {}) {
+  const res = await fetch(`${API_BASE}/api/desktop/intent`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ utterance, fromVoice, assistantName }) })
+  return parseJson(res)
+}
+
+export async function desktopPlan(token, { action, args = {}, context = {} } = {}) {
+  const res = await fetch(`${API_BASE}/api/desktop/plan`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ action, args, context }) })
+  return parseJson(res)
+}
+
+export async function desktopExecute(token, { planId, approvedThisAction = false } = {}) {
+  const res = await fetch(`${API_BASE}/api/desktop/execute`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ planId, approvedThisAction }) })
+  // an execution can come back a non-2xx (403 denied) with a structured body we want to show
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok && !data?.status) {
+    const err = new Error(data?.error?.message || `Execute failed (${res.status})`)
+    err.status = res.status
+    throw err
+  }
+  return data
+}
+
+export async function desktopStop(token) {
+  const res = await fetch(`${API_BASE}/api/desktop/stop`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({}) })
+  return parseJson(res)
+}
+
+export async function desktopAudit(token, limit = 50) {
+  const res = await fetch(`${API_BASE}/api/desktop/audit?limit=${Number(limit) || 50}`, { headers: authHeaders(token) })
   return parseJson(res)
 }
 

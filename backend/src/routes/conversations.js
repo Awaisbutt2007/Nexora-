@@ -106,5 +106,17 @@ router.delete('/:id', (req, res) => {
   res.status(204).end()
 })
 
+/* Delete every conversation the caller owns in one shot. Messages cascade through
+   the FK, but we clear them explicitly first so the returned count is trustworthy
+   and nothing is left behind even if foreign_keys were ever turned off. */
+router.delete('/', (req, res) => {
+  const db = getDb()
+  db.prepare(
+    'DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)',
+  ).run(req.user.id)
+  const info = db.prepare('DELETE FROM conversations WHERE user_id = ?').run(req.user.id)
+  res.json({ object: 'list', deleted: info.changes })
+})
+
 export { titleFromPrompt }
 export default router

@@ -21,7 +21,6 @@ const GREETINGS = [
   'Hi!\nWhat is your name?',
   'Lovely name!\nWhat do you want to name me?',
   'Almost there…\nI have no voice yet. Choose one.',
-  'A face, then…\nWant to give me one of your own?',
   'Everything is ready.\nSay hello to your AI.',
 ]
 
@@ -134,13 +133,6 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
   const [playingId, setPlayingId] = useState(null)
   const [naming, setNaming] = useState(null)
   const [voiceName, setVoiceName] = useState('')
-  /* Stage 4 (face): 'default' keeps the gender portrait, 'custom' uses an upload */
-  const [faceChoice, setFaceChoice] = useState(saved.faceChoice === 'custom' ? 'default' : (saved.faceChoice || 'default'))
-  const [facePhotoUrl, setFacePhotoUrl] = useState(null)
-  /* Which slice of the uploaded photo the particle engine actually locked onto */
-  const [faceBox, setFaceBox] = useState(null)
-  const [facePhotoName, setFacePhotoName] = useState(typeof saved.facePhotoName === 'string' ? saved.facePhotoName : '')
-  const faceInputRef = useRef(null)
   /* Reveal stage: the Back / Enter buttons stay hidden until Aira finishes speaking */
   const [introDone, setIntroDone] = useState(false)
 
@@ -149,16 +141,10 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
     'Pick your name',
     'Name your AI',
     'Choose a voice',
-    'Add a face',
   ]
-  /* Which particle shape to show on the current stage */
-  const particleShape = stage <= 1
-    ? 'orb'
-    : stage === 2
-      ? voiceGender
-      : faceChoice === 'custom' && facePhotoUrl
-        ? 'custom'
-        : voiceGender
+  /* Which particle shape to show on the current stage: orb until the voice is
+     picked, then the chosen gender portrait (there is no custom-face step). */
+  const particleShape = stage <= 1 ? 'orb' : voiceGender
 
   /* Reveal text: greeting + the fixed invitation line (also what gets spoken) */
   const introLine = buildIntro(name, aiName)
@@ -166,7 +152,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
   /* Stage 1 greets the human back with the name they just typed */
   const greeting = stage === 1 && name.trim()
     ? `Lovely name, ${name.trim()}!\n${GREETINGS[1].split('\n')[1]}`
-    : stage === 4
+    : stage === 3
       ? introLine
       : GREETINGS[stage]
 
@@ -185,11 +171,9 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
         characterId: character?.id || null,
         characterName: character?.name || null,
         characterDesc: character?.desc || null,
-        faceChoice,
-        facePhotoName,
       }))
     } catch { /* private mode */ }
-  }, [source, stage, name, aiName, voiceGender, character, faceChoice, facePhotoName])
+  }, [source, stage, name, aiName, voiceGender, character])
 
   /* Typewriter loop: slight random delay per key, longer pause after line breaks */
   useEffect(() => {
@@ -463,29 +447,6 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
     setStage(3)
   }
 
-  /* Stage 4: pick a face — upload a photo (particles morph into it) or keep default */
-  const handleFaceFile = (event) => {
-    const file = (event.target.files || [])[0]
-    event.target.value = ''
-    if (!file || !file.type.startsWith('image/')) return
-    setFacePhotoUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(file) })
-    setFacePhotoName(file.name.replace(/\.[^.]+$/, '').slice(0, 40))
-    setFaceBox(null)
-    setFaceChoice('custom')
-  }
-
-  const keepDefaultFace = () => {
-    setFaceChoice('default')
-    setFacePhotoUrl((old) => { if (old) URL.revokeObjectURL(old); return null })
-    setFacePhotoName('')
-    setFaceBox(null)
-  }
-
-  const handleFaceContinue = () => {
-    saveAiProfile({ face: faceChoice, hasCustomFace: faceChoice === 'custom' && !!facePhotoUrl })
-    setStage(4)
-  }
-
   /* Speak a Roman-Urdu line clause-by-clause with emotional pitch/rate contour */
   const speakLine = (text, { onstart, onend } = {}) => {
     if (!('speechSynthesis' in window)) { onend?.(); return }
@@ -516,7 +477,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
      The footer buttons only appear once the speech ends (onend) — with a
      watchdog fallback so a dropped onend never traps the user on the screen. */
   useEffect(() => {
-    if (stage !== 4) return undefined
+    if (stage !== 3) return undefined
     setIntroDone(false)
     let fallback = 0
     const timer = setTimeout(() => {
@@ -552,7 +513,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
         </ol>
       </header>
 
-      <section className={`onboarding-body${stage === 4 ? ' reveal' : ''}`}>
+      <section className={`onboarding-body${stage === 3 ? ' reveal' : ''}`}>
         <div className="onboarding-copy">
           <h1 className="type-heading">
             {/* Invisible full text reserves the final height so typing never shifts the layout */}
@@ -710,48 +671,12 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
           )}
 
           {stage === 3 && (
-            <div className="face-block">
-              {/* Uploaded photo shown as a round DP, centred above the text.
-                  It is zoomed onto the exact region the particles locked onto,
-                  so the user can see what the AI took as "the face". */}
-              {faceChoice === 'custom' && facePhotoUrl && (
-                <div className="face-dp">
-                  <div
-                    className="face-dp-img"
-                    style={faceBox && faceBox.w > 0 && faceBox.w < 0.995 && faceBox.h < 0.995
-                      ? {
-                        backgroundImage: `url(${facePhotoUrl})`,
-                        backgroundSize: `${(100 / faceBox.w).toFixed(1)}% ${(100 / faceBox.h).toFixed(1)}%`,
-                        backgroundPosition: `${((faceBox.x / (1 - faceBox.w)) * 100).toFixed(1)}% ${((faceBox.y / (1 - faceBox.h)) * 100).toFixed(1)}%`,
-                      }
-                      : { backgroundImage: `url(${facePhotoUrl})`, backgroundSize: 'cover' }}
-                  />
-                </div>
-              )}
-              <p className="voice-sub">Upload a photo and I will take that shape — or keep the default face you already saw.</p>
-              <div className="face-controls">
-                <button type="button" className={`face-upload${faceChoice === 'custom' ? ' active' : ''}`} onClick={() => faceInputRef.current?.click()}>
-                  <span>⬆</span> {faceChoice === 'custom' && facePhotoName ? `Change photo` : 'Upload image'}
-                </button>
-                <input ref={faceInputRef} type="file" accept="image/*" hidden onChange={handleFaceFile} />
-                <button type="button" className={`face-default${faceChoice === 'default' ? ' active' : ''}`} onClick={keepDefaultFace}>
-                  Keep the default {voiceGender} face
-                </button>
-              </div>
-              <div className="voice-footer">
-                <button className="voice-back" type="button" onClick={() => setStage(2)}>Back</button>
-                <button className="onboarding-continue" type="button" onClick={handleFaceContinue}>Continue</button>
-              </div>
-            </div>
-          )}
-
-          {stage === 4 && (
             <div className="reveal-block">
               {/* Back pinned to the far left, the next action to the far right.
                   Space is reserved (visibility, not display) so the layout never
                   jumps — the row only becomes visible once the intro has played. */}
               <div className={`reveal-actions${introDone ? ' show' : ''}`}>
-                <button className="voice-back" type="button" onClick={() => { window.speechSynthesis?.cancel(); setStage(3) }}>Back</button>
+                <button className="voice-back" type="button" onClick={() => { window.speechSynthesis?.cancel(); setStage(2) }}>Back</button>
                 <button className="onboarding-continue" type="button" onClick={handleFinish}>Enter Nexora</button>
               </div>
             </div>
@@ -761,8 +686,8 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
         </div>
 
         <div className="onboarding-visual">
-          {/* Particles morph: orb → gender portrait → (optional) the user's uploaded face */}
-          <NanoParticles count={30000} shape={particleShape} photoUrl={faceChoice === 'custom' ? facePhotoUrl : null} onFaceBox={setFaceBox} />
+          {/* Particles morph: orb → the chosen gender portrait */}
+          <NanoParticles count={30000} shape={particleShape} />
         </div>
       </section>
     </main>

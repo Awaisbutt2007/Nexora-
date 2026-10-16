@@ -179,6 +179,19 @@ test('cross-user access is denied (404) on conversations', async () => {
   assert.equal((await api('GET', `/api/conversations/${cid}`, { token: a.token })).status, 200)
 })
 
+test('conversations: delete-all clears only the caller threads', async () => {
+  const a = await newUser('Ann')
+  const b = await newUser('Bob')
+  await api('POST', '/api/conversations', { token: a.token, body: { title: 'A1' } })
+  await api('POST', '/api/conversations', { token: a.token, body: { title: 'A2' } })
+  await api('POST', '/api/conversations', { token: b.token, body: { title: 'B1' } })
+  const del = await api('DELETE', '/api/conversations', { token: a.token })
+  assert.equal(del.status, 200)
+  assert.equal(del.json.deleted, 2)
+  assert.equal((await api('GET', '/api/conversations', { token: a.token })).json.data.length, 0)
+  assert.equal((await api('GET', '/api/conversations', { token: b.token })).json.data.length, 1)
+})
+
 test('validation: bad body → structured 400 with no internals', async () => {
   const { token } = await newUser()
   const r = await api('POST', '/api/conversations', { token, body: { title: 'x'.repeat(500) } })
@@ -192,4 +205,33 @@ test('unknown route → clean 404 not_found', async () => {
   const r = await api('GET', '/api/does-not-exist', { token })
   assert.equal(r.status, 404)
   assert.equal(r.json.error.type, 'not_found')
+})
+
+/* ── Desktop agent bridge ──────────────────────────────────────────────────
+   These run with DESKTOP_AGENT_SECRET unset (the test env never sets it), so
+   they prove two things without needing a live agent: the proxy is behind
+   requireAuth, and it fails CLOSED (503) rather than reaching for the network. */
+
+test('desktop bridge: every route requires auth (401 without a token)', async () => {
+  assert.equal((await api('GET', '/api/desktop/permissions')).status, 401)
+  assert.equal((await api('POST', '/api/desktop/plan', { body: { action: 'system.info' } })).status, 401)
+  assert.equal((await api('POST', '/api/desktop/execute', { body: { planId: 'x' } })).status, 401)
+})
+
+test('desktop bridge: fails closed when the shared secret is not set', async () => {
+  const { token } = await newUser()
+  const h = await api('GET', '/api/desktop/health', { token })
+  assert.equal(h.status, 503)
+  assert.equal(h.json.enabled, false, 'health reports the bridge OFF instead of faking a live agent')
+  const g = await api('POST', '/api/desktop/permissions/grant', { token, body: { scope: 'files' } })
+  assert.equal(g.status, 503)
+  assert.equal(g.json.error.type, 'desktop_bridge_disabled')
+  assert.ok(!/node_modules|at .*\.js:/.test(g.text), 'no internals in the disabled error')
+})
+
+test('desktop bridge: validates the NL intent request before calling the model (400)', async () => {
+  const { token } = await newUser()
+  const r = await api('POST', '/api/desktop/intent', { token, body: { utterance: '' } })
+  assert.equal(r.status, 400)
+  assert.equal(r.json.error.type, 'invalid_request_error')
 })
