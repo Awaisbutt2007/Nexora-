@@ -67,12 +67,18 @@ router.get('/:id', (req, res) => {
     return res.status(404).json({ error: { message: 'Conversation not found', type: 'not_found' } })
   }
 
-  const messages = db
+  const rows = db
     .prepare(
-      `SELECT id, role, content, tokens, created_at AS createdAt
+      `SELECT id, role, content, tokens, created_at AS createdAt, images_json
        FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`,
     )
     .all(conversation.id)
+
+  /* camelCase contract: hand the client a parsed images array, never raw JSON. */
+  const messages = rows.map(({ images_json, ...m }) => ({
+    ...m,
+    images: images_json ? JSON.parse(images_json) : null,
+  }))
 
   res.json({ ...conversation, messages })
 })

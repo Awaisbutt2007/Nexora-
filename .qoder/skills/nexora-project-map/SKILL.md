@@ -44,14 +44,16 @@ wire anything new through them.
 
 | Task | Command |
 | --- | --- |
-| Frontend dev | `npm run dev` (Vite; `http://localhost:5173`, falls back to the next free port) |
+| Both servers at once | `npm run dev:all` (`scripts/dev-all.mjs`: API + Vite, `[api]`/`[web]` log prefixes, Ctrl+C closes both) |
+| Frontend dev | `npm run dev` (Vite; `http://localhost:5173`, silently rolls to the next free port) |
 | Backend dev | `npm run dev:api` (`node --watch`), or `npm run start:api` |
 | Production build | `npm run build` |
 | Lint | `npm run lint` (oxlint) |
+| Backend tests | `npm --prefix backend test` (needs no running server) |
 | Recreate the DB | `npm --prefix backend run db:reset` |
 
 **Baseline after any change:** `npm run build` succeeds and `npm run lint` reports
-6 warnings / 0 errors — those 6 are pre-existing `react-hooks/exhaustive-deps` style
+11 warnings / 0 errors — those 11 are pre-existing `react-hooks/exhaustive-deps` style
 noise. Anything above that baseline is yours to fix.
 
 ## State the app remembers
@@ -62,15 +64,25 @@ noise. Anything above that baseline is yours to fix.
 | `nexora_onboarding_pending` | `Nexora()` | `'1'` (Google) or `'signup'` — keeps the wizard in front |
 | `nexora_onboarding_progress` | `Onboarding.jsx` | Half-finished wizard stage |
 
-## Two gotchas that cost hours
+## Three gotchas that cost hours
 
-1. **CORS is an exact origin list.** `CORS_ORIGIN` defaults to `http://localhost:5173`.
-   A second Vite instance on `:5174` is rejected: the preflight answers 204 with no
-   `Access-Control-Allow-Origin`, so every `fetch` dies as a network error — which looks
-   like a broken login, not a config problem. Add the extra origin to `backend/.env`
-   (`CORS_ORIGIN=http://localhost:5173,http://localhost:5174`) or test on 5173.
-2. **The API base** is `import.meta.env.VITE_API_URL || 'http://localhost:8787'`.
-   The backend answers `GET /health` (not `/api/health`).
+1. **The page talks to the API through Vite, not cross-origin.** `API_BASE` in
+   `src/api/nexora.js` is `import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' :
+   'http://localhost:8787')` — in dev that is an empty string, so every call is a relative
+   `/api/...` (and `/uploads/...`) request that `vite.config.js` proxies to `:8787`. Set
+   `VITE_API_URL` only to bypass the proxy (a deployed backend); the production build keeps
+   the absolute default. A down backend then reaches the browser as an empty **502** from the
+   proxy (not a network error), and `parseJson()`/`apiErrorText()` render that as the same
+   "start the API with npm run dev:all" message — `dev:all` exists so the pair is never
+   started apart.
+2. **When you do hit a real cross-origin call, an unlisted origin looks like broken auth.**
+   `fetch` then rejects with an opaque `TypeError: Failed to fetch`, no status. `CORS_ORIGIN`
+   is an exact comma list (`http://localhost:5173` by default); in development the backend
+   also reflects any loopback or RFC 1918 origin on any port (`config.corsAllowLocalOrigins`),
+   which covers Vite's port rollover to `:5174`, the printed `http://192.168.x.x:5173` Network
+   URL and a phone on the same Wi-Fi. `apiErrorText()` turns the residual cases into a toast
+   that names the failing address.
+3. **The backend answers `GET /health`, not `/api/health`.**
 
 ## Related skills
 

@@ -19,13 +19,13 @@ const PROVIDER_VOICES = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shi
 
 /* Session language → ISO-639-1 hint for the ASR lane; 'auto' means let the
    transcriber detect per utterance (needed for natural code-switching). */
-const LANGUAGE_CODES = { en: 'en', ur: 'ur', auto: null }
+const LANGUAGE_CODES = { en: 'en', ur: 'ur', hinglish: null, auto: null }
 
 export function isSupportedVoice(voice) {
   return PROVIDER_VOICES.includes(voice)
 }
 
-export function buildVoiceInstructions({ assistantName = 'Aira', userName = '', memories = [], persona = '' } = {}) {
+export function buildVoiceInstructions({ assistantName = 'Aira', userName = '', memories = [], persona = '', language = '' } = {}) {
   const memoryBlock = memories.length
     ? `\nKnown user context (approved memories — use only when relevant, never recite the list):\n${memories.map((m) => `- ${m.key}: ${m.value}`).join('\n')}`
     : ''
@@ -34,6 +34,14 @@ export function buildVoiceInstructions({ assistantName = 'Aira', userName = '', 
   const personaBlock = persona
     ? `\nCharacter the user picked for you at setup: ${persona}.\nEmbody that tone through word choice and pacing, but stay honest — you are still an AI assistant, not a real person in that role.`
     : ''
+  /* The language chosen in Settings is a hard override for speech too, so a Talk
+     call answers in the one language they picked instead of mirroring each turn. */
+  const lang = typeof language === 'string' ? language.trim().toLowerCase() : ''
+  const languageRule =
+    lang === 'en' ? 'The user set their language to English: ALWAYS speak in English, no matter what language they reply in.'
+    : lang === 'ur' ? 'The user set their language to Urdu: ALWAYS speak in Urdu, no matter what language they reply in.'
+    : lang === 'hinglish' ? 'The user set their language to Hinglish: ALWAYS speak in Hinglish — Hindi/Urdu conversation mixed with English words (e.g. "main badhiya hoon, tum sunao") — NOT plain English, no matter what language they reply in.'
+    : 'Reply in whichever language the user last used unless they ask otherwise.'
 
   return `You are ${assistantName}, a personal voice assistant inside the Nexora workspace. You are having a live spoken conversation.${who}
 
@@ -46,8 +54,9 @@ Voice and style:
 - Match the user's energy: casual with casual, focused with serious.
 
 Languages:
-- Understand and reply in English, Urdu, and Roman Urdu, including mixed sentences like "Aira, mujhe mera project explain karo in English" (reply in the language the request targets).
-- Reply in whichever language the user last used unless they ask otherwise. When reading Roman Urdu aloud, pronounce it as natural Urdu.
+- Understand English, Urdu, Roman Urdu and Hinglish, including mixed sentences like "Aira, mujhe mera project explain karo in English".
+- ${languageRule}
+- When reading Roman Urdu/Hinglish aloud, pronounce it as natural spoken Urdu/Hindi.
 
 Conversation intelligence:
 - Use the full conversation context; never repeat something you already answered — build on it.
@@ -70,7 +79,7 @@ export function buildRealtimeSession({ assistantName, userName, voice, language,
   return {
     type: 'realtime',
     model: config.voiceRealtimeModel,
-    instructions: buildVoiceInstructions({ assistantName, userName, memories, persona }),
+    instructions: buildVoiceInstructions({ assistantName, userName, memories, persona, language }),
     audio: {
       input: {
         transcription,

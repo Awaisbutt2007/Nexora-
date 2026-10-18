@@ -16,14 +16,27 @@ function buildMessages(history, userMemories = [], ctx = {}) {
 
   return [
     { role: 'system', content: systemPromptFor(ctx) + memoryBlock },
-    ...history.map((m) => ({ role: m.role, content: m.content })),
+    /* A turn with attached images becomes OpenAI-style multimodal content — a
+       text part plus one image_url part per picture (base64 data URLs, because
+       the provider cannot reach our localhost /uploads). */
+    ...history.map((m) => (m.images?.length
+      ? {
+          role: m.role,
+          content: [
+            { type: 'text', text: m.content || `The user attached ${m.images.length} image${m.images.length > 1 ? 's' : ''}. Look at ${m.images.length > 1 ? 'them' : 'it'} and reply.` },
+            ...m.images.map((url) => ({ type: 'image_url', image_url: { url } })),
+          ],
+        }
+      : { role: m.role, content: m.content })),
   ]
 }
 
 /** Mock ChatGPT-style SSE stream when no API key is set */
 async function* mockStream(messages) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')
-  const prompt = lastUser?.content?.trim() || 'Hello'
+  /* Multimodal turns carry an array of parts — read the text part, not the object. */
+  const raw = typeof lastUser?.content === 'string' ? lastUser.content : lastUser?.content?.[0]?.text
+  const prompt = raw?.trim() || 'Hello'
   const reply =
     `I'm Nexora — your personal AI assistant.\n\n` +
     `You asked: “${prompt.slice(0, 280)}${prompt.length > 280 ? '…' : ''}”\n\n` +
@@ -37,13 +50,14 @@ async function* mockStream(messages) {
   }
 }
 
-export async function* streamChatCompletion({ history, memories, model, assistantName, userName, persona }) {
-  const messages = buildMessages(history, memories, { assistantName, userName, persona })
+export async function* streamChatCompletion({ history, memories, model, assistantName, userName, persona, language, signal }) {
+  const messages = buildMessages(history, memories, { assistantName, userName, persona, language })
   const client = createClient()
   const usedModel = model || config.openaiModel
 
   if (!client) {
     for await (const chunk of mockStream(messages)) {
+      if (signal?.aborted) break
       yield { ...chunk, model: 'nexora-mock' }
     }
     return
@@ -53,11 +67,16 @@ export async function* streamChatCompletion({ history, memories, model, assistan
     model: usedModel,
     messages,
     max_tokens: 900,
+    /* When the user pinned a specific language, cool the sampling down so the
+       model sticks to the (mandatory) language rule instead of drifting back to
+       English/Roman the way it can at the default temperature. */
+    ...(language && language !== 'auto' ? { temperature: 0.35 } : {}),
     stream: true,
     stream_options: { include_usage: true },
-  })
+  }, { signal })
 
   for await (const part of stream) {
+    if (signal?.aborted) break
     const delta = part.choices?.[0]?.delta?.content
     if (delta) {
       yield { content: delta, model: usedModel, usage: null }
@@ -68,8 +87,8 @@ export async function* streamChatCompletion({ history, memories, model, assistan
   }
 }
 
-export async function completeChat({ history, memories, model, assistantName, userName, persona }) {
-  const messages = buildMessages(history, memories, { assistantName, userName, persona })
+export async function completeChat({ history, memories, model, assistantName, userName, persona, language }) {
+  const messages = buildMessages(history, memories, { assistantName, userName, persona, language })
   const client = createClient()
   const usedModel = model || config.openaiModel
 
@@ -87,6 +106,7 @@ export async function completeChat({ history, memories, model, assistantName, us
     model: usedModel,
     messages,
     max_tokens: 900,
+    ...(language && language !== 'auto' ? { temperature: 0.35 } : {}),
   })
 
   return {

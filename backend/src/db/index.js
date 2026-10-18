@@ -48,6 +48,7 @@ function migrate(database) {
       content TEXT NOT NULL,
       tokens INTEGER DEFAULT 0,
       created_at TEXT NOT NULL,
+      images_json TEXT,
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
     );
 
@@ -99,6 +100,13 @@ function migrate(database) {
   }
   if (!userColumns.includes('google_sub')) {
     database.exec('ALTER TABLE users ADD COLUMN google_sub TEXT')
+  }
+
+  /* User-attached reference images live as /uploads paths in a JSON array so a
+     text-only message and an image message can share the same table. */
+  const messageColumns = database.prepare('PRAGMA table_info(messages)').all().map((col) => col.name)
+  if (!messageColumns.includes('images_json')) {
+    database.exec('ALTER TABLE messages ADD COLUMN images_json TEXT')
   }
 
   // Voice enrollment: CREATE TABLE IF NOT EXISTS above covers fresh and existing

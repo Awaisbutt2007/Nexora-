@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid'
 import { z } from 'zod'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
+import { aiLimiter } from '../middleware/rateLimit.js'
 import { deductCredits, ensureCredits } from '../services/credits.js'
 import { buildImageUrl, isNsfwPrompt } from '../services/images.js'
 import { completeChat } from '../services/ai.js'
@@ -70,7 +71,7 @@ router.get('/runs', (req, res) => {
   res.json({ object: 'list', data: rows })
 })
 
-router.post('/:toolId/run', async (req, res, next) => {
+router.post('/:toolId/run', aiLimiter, async (req, res, next) => {
   try {
     const tool = TOOL_CATALOG.find((t) => t.id === req.params.toolId)
     if (!tool) {

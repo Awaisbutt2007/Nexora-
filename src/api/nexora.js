@@ -2,7 +2,12 @@
  * Thin Nexora API client (ChatGPT-style streaming chat).
  * Backend default: http://localhost:8787
  */
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+/* In development the page's own dev server proxies /api and /uploads to the backend
+   (see vite.config.js), so requests are SAME-ORIGIN: no port rollover, LAN address or
+   localhost-vs-127.0.0.1 mix-up can produce a CORS "Failed to fetch" that reads like a
+   wrong password. Set VITE_API_URL to aim somewhere else and the absolute URL wins. */
+const API_BASE = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' : 'http://localhost:8787')
+const API_LABEL = API_BASE || 'the backend (proxied at /api by this page\'s dev server)'
 const SESSION_KEY = 'nexora_user_session'
 
 function authHeaders(token) {
@@ -10,6 +15,23 @@ function authHeaders(token) {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
+}
+
+/** The one instruction every "the API is not answering" path should end with. */
+function backendUnreachableText() {
+  return `Can't reach ${API_LABEL}. Start it with "npm run dev:all" (backend on port 8787) and try again.`
+}
+
+/** A fetch that never reached the server (backend down, or CORS refused the port the
+ *  page is served from) throws a bare TypeError whose message is "Failed to fetch" —
+ *  which reads like a wrong password and sends users hunting for a bug that isn't there.
+ *  Name the real cause and the fix instead. */
+export function apiErrorText(err, fallback = 'Request failed — is the backend running?') {
+  const msg = typeof err?.message === 'string' ? err.message : ''
+  if (err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg)) {
+    return backendUnreachableText()
+  }
+  return msg || fallback
 }
 
 export function loadSession() {
@@ -54,22 +76,42 @@ export function mapUser(user) {
   }
 }
 
-export async function register({ name, email, password, phone }) {
-  const res = await fetch(`${API_BASE}/api/auth/register`, {
+/* One quiet retry for the auth endpoints. `node --watch` restarts the backend on every
+   edit, and any blip in that window reaches the browser as a bare TypeError ("Failed to
+   fetch") — or, once the request goes through the dev-server proxy, as an empty 502.
+   Either way a user reads it as "my login is broken", so try again ~700ms later. */
+async function authFetch(path, payload) {
+  const send = () => fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ name, email, password, phone }),
+    body: JSON.stringify(payload),
   })
-  return parseJson(res)
+  try {
+    const res = await send()
+    if (res.status !== 502 && res.status !== 504) return res
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    return send()
+  } catch (err) {
+    if (!(err instanceof TypeError)) throw err
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    return send()
+  }
+}
+
+export async function register({ name, email, password, phone }) {
+  try {
+    return await parseJson(await authFetch('/api/auth/register', { name, email, password, phone }))
+  } catch (err) {
+    /* That email already has an account — the user pressed Create Account, so honour it
+       and sign them straight in instead of throwing a 409 at them. This is also what makes
+       a double submit (retry, reload, second tab) land inside rather than error out. */
+    if (err.status !== 409) throw err
+    return login({ email, password })
+  }
 }
 
 export async function login({ email, password }) {
-  const res = await fetch(`${API_BASE}/api/auth/login`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ email, password }),
-  })
-  return parseJson(res)
+  return parseJson(await authFetch('/api/auth/login', { email, password }))
 }
 
 /**
@@ -94,6 +136,44 @@ export async function updateProfile(token, payload) {
     method: 'PATCH',
     headers: authHeaders(token),
     body: JSON.stringify(payload),
+  })
+  return parseJson(res)
+}
+
+/** Upload one downscaled reference image (data URL) for a chat attachment. */
+export async function uploadChatImage(token, dataUrl) {
+  const res = await fetch(`${API_BASE}/api/chat/images`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ dataUrl }),
+  })
+  return parseJson(res)
+}
+
+/** Turn a backend-relative resource path (/uploads/img_x.jpg) into a full URL. */
+export function resourceUrl(path) {
+  return path?.startsWith('/') ? `${API_BASE}${path}` : path
+}
+
+/**
+ * Change the signed-in account's email. Requires the current password so a
+ * stolen token alone can't hijack the account. Returns { user, token }.
+ */
+export async function updateEmail(token, { currentPassword, email }) {
+  const res = await fetch(`${API_BASE}/api/auth/email`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ currentPassword, email }),
+  })
+  return parseJson(res)
+}
+
+/** Change the account password (needs the current one). Returns { user }. */
+export async function updatePassword(token, { currentPassword, newPassword }) {
+  const res = await fetch(`${API_BASE}/api/auth/password`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ currentPassword, newPassword }),
   })
   return parseJson(res)
 }
@@ -146,11 +226,12 @@ export async function runTool(token, toolId, { prompt, input, assistantName, per
  * Stream chat like ChatGPT (SSE). Calls onDelta(textChunk) for each piece.
  * Returns { conversationId, fullText }.
  */
-export async function streamChat({ token, message, conversationId = null, assistantName, persona, onDelta, onMeta }) {
+export async function streamChat({ token, message, conversationId = null, assistantName, persona, language, images, onDelta, onMeta, signal }) {
   const res = await fetch(`${API_BASE}/api/chat/completions`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ message, conversationId, assistantName, persona, stream: true }),
+    body: JSON.stringify({ message, conversationId, assistantName, persona, language, images, stream: true }),
+    signal,
   })
 
   if (!res.ok) {
@@ -166,7 +247,15 @@ export async function streamChat({ token, message, conversationId = null, assist
   let buffer = ''
 
   while (true) {
-    const { done, value } = await reader.read()
+    let result
+    try {
+      result = await reader.read()
+    } catch (e) {
+      // User pressed Stop: keep the partial answer already rendered, don't throw.
+      if (e?.name === 'AbortError') break
+      throw e
+    }
+    const { done, value } = result
     if (done) break
     buffer += decoder.decode(value, { stream: true })
     const parts = buffer.split('\n')
@@ -202,11 +291,11 @@ export async function streamChat({ token, message, conversationId = null, assist
  * has gone quiet. Best-effort: returns { content, skipped } — empty content means
  * there was nothing to send (mock mode, or the last turn wasn't the assistant's).
  */
-export async function proactiveChat({ token, conversationId, assistantName, persona }) {
+export async function proactiveChat({ token, conversationId, assistantName, persona, language }) {
   const res = await fetch(`${API_BASE}/api/chat/proactive`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ conversationId, assistantName, persona }),
+    body: JSON.stringify({ conversationId, assistantName, persona, language }),
   })
   return parseJson(res)
 }
@@ -214,7 +303,12 @@ export async function proactiveChat({ token, conversationId, assistantName, pers
 async function parseJson(res) {
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const err = new Error(data?.error?.message || `Request failed (${res.status})`)
+    /* A dev-server proxy whose target refused the connection answers 502/504 with an empty
+       body, so "the backend is not running" would otherwise arrive as a bare number. */
+    const deadGateway = (res.status === 502 || res.status === 504) && !data?.error?.message
+    const err = new Error(
+      data?.error?.message || (deadGateway ? backendUnreachableText() : `Request failed (${res.status})`),
+    )
     err.status = res.status
     throw err
   }

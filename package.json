@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:all": "node scripts/dev-all.mjs",
     "dev:api": "npm --prefix backend run dev",
     "start:api": "npm --prefix backend start",
     "dev:agent": "npm --prefix desktop-agent run dev",
@@ -13,6 +14,12 @@
     "lint": "oxlint",
     "test": "npm --prefix backend test",
     "test:api": "npm --prefix backend test",
+    "test:agent": "npm --prefix desktop-agent test",
+    "security:scan": "node scripts/secret-scan.mjs",
+    "security:scan:history": "node scripts/secret-scan.mjs --history",
+    "security:check": "node scripts/security-check.mjs",
+    "security:check:full": "node scripts/security-check.mjs --history",
+    "audit:all": "npm audit --omit=dev && npm --prefix backend audit --omit=dev && npm --prefix desktop-agent audit --omit=dev",
     "preview": "vite preview"
   },
   "dependencies": {

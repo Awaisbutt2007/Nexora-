@@ -6,7 +6,8 @@ description: How to add or change an endpoint in the Nexora Express 5 + node:sql
 # Nexora Backend API
 
 Express 5 + `node:sqlite`, ESM only, no TypeScript, no ORM. Start with
-`npm run dev:api` from the repo root (`node --watch src/index.js`, port **8787**).
+`npm run dev:api` from the repo root (`node --watch src/index.js`, port **8787**), or
+`npm run dev:all` to run the API and Vite together so one is never left down.
 
 ## Layout — put new code in the layer that owns it
 
@@ -76,15 +77,25 @@ lower-cased email — new accounts get `bcrypt.hash(nanoid(24))` as an unusable 
 
 ## Gotchas
 
-- **CORS is an exact origin list.** `CORS_ORIGIN` (default `http://localhost:5173`) is
-  split on commas. A second Vite instance on `:5174` gets a 204 preflight with no
-  `Access-Control-Allow-Origin`, so every fetch dies as an opaque network error that looks
-  like broken auth. Add the origin to `backend/.env` instead of debugging the frontend.
+- **A linked frontend normally never triggers CORS at all.** In dev the page uses relative
+  URLs (`/api/...`) and Vite proxies them to `:8787` (`vite.config.js`), so requests are
+  same-origin no matter which port, LAN IP or phone hit the app. The backend's own resolver
+  is the second line of defence: `CORS_ORIGIN` (default `http://localhost:5173`) is split on
+  commas, and in dev `config.corsAllowLocalOrigins` also reflects loopback **and** RFC 1918
+  origins (`10.x`, `192.168.x`, `172.16-31.x`) on any port. An unlisted origin makes every
+  fetch die as an opaque `TypeError: Failed to fetch` that looks exactly like broken auth —
+  the frontend renders it readably via `apiErrorText()` in `src/api/nexora.js`.
+  Note the `cors@2` callback contract: `origin: (originString, cb)` — NOT `(req, cb)`, and
+  a falsy second arg means `next()` with no CORS headers (the correct deny).
 - `data/nexora.db` (+ `-wal`/`-shm`) and `uploads/` are runtime state.
   `npm --prefix backend run db:reset` **deletes** them; only run it when asked.
 - There is no seeded user. The frontend's "Continue as Demo" does
   `login(demo@nexora.ai/demo1234)` and on failure `register()`s that account — a fresh DB
   needs one demo click before the user exists.
+- `POST /api/auth/register` answers **409** for a taken email. The client treats that as
+  "you already have an account" and silently falls back to `login()` (`register()` in
+  `src/api/nexora.js`), so a signed-up user landing on a pre-existing email still gets in
+  instead of seeing an error.
 - Schema changes go in `migrate()` in `db/index.js` as `CREATE TABLE IF NOT EXISTS` plus a
   guarded `ALTER TABLE` (`PRAGMA table_info` check), so old databases upgrade in place.
 

@@ -1,0 +1,55 @@
+name: Security
+
+# Blocks commits/PRs that leak secrets and runs the hardening regression suite.
+# The secret scan is local-only tooling (no third-party service, source never leaves CI).
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret & tracked-file gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history so the history scan can see every blob
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Aggregate security check (tracked files + working tree + history)
+        run: node scripts/security-check.mjs --history
+
+  build-test:
+    name: Build, lint, tests & dependency audit
+    runs-on: ubuntu-latest
+    needs: secrets
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install (root, backend, desktop-agent)
+        run: |
+          npm ci || npm install
+          npm --prefix backend ci || npm --prefix backend install
+          npm --prefix desktop-agent ci || npm --prefix desktop-agent install
+      - name: Lint
+        run: npm run lint
+      - name: Frontend production build
+        run: npm run build
+      - name: Backend tests (incl. security regressions)
+        run: npm --prefix backend test
+      - name: Desktop-agent security tests
+        run: npm --prefix desktop-agent test
+      - name: Dependency vulnerability audit (fail on HIGH/CRITICAL)
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm --prefix backend audit --omit=dev --audit-level=high

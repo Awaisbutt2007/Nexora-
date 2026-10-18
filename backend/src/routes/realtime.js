@@ -15,7 +15,7 @@ router.use(requireAuth)
 
 const tokenSchema = z.object({
   voice: z.string().trim().max(20).optional(),
-  language: z.enum(['auto', 'en', 'ur']).optional().default('auto'),
+  language: z.enum(['auto', 'en', 'ur', 'hinglish']).optional().default('auto'),
   assistantName: z.string().trim().min(1).max(40).optional(),
   /* Short descriptor chosen at onboarding (e.g. "Assistant — sharp chief-of-staff energy").
      Not a secret; caps at 200 chars so a bad actor can't stuff the system prompt. */

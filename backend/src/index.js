@@ -24,14 +24,33 @@ const app = express()
    limiter) is the real client, not the load balancer. Off by default in local dev. */
 app.set('trust proxy', config.trustProxy ? 1 : false)
 
+/* CORS is an exact origin list in production, but in development a request from any
+   local origin is allowed too — see config.corsAllowLocalOrigins for why an unlisted
+   origin is indistinguishable from a broken login on the client. */
+const corsAllowlist = config.corsOrigin === '*' ? null : config.corsOrigin.split(',').map((s) => s.trim())
+// localhost / 127.x.x.x / ::1, plus the RFC 1918 ranges a dev LAN lives in.
+const LOCAL_ORIGIN = /^https?:\/\/(?:localhost|\[::1\]|127(?:\.\d{1,3}){3}|10(?:\.\d{1,3}){3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d{2,5})?$/
+
 app.use(
   cors({
-    origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',').map((s) => s.trim()),
+    // cors v2 hands the custom resolver the request's Origin STRING, not the request.
+    origin: (origin, callback) => {
+      // No Origin header = not a CORS request (same-origin, curl, server-to-server).
+      if (!origin) return callback(null, false)
+      if (!corsAllowlist) return callback(null, true)
+      if (corsAllowlist.includes(origin)) return callback(null, true)
+      return callback(null, Boolean(config.corsAllowLocalOrigins && LOCAL_ORIGIN.test(origin)))
+    },
     credentials: true,
     exposedHeaders: ['X-Conversation-Id'],
   }),
 )
 app.use(express.json({ limit: '2mb' }))
+
+/* User-attached reference images are saved under uploads/ with unguessable
+   nanoid names and served straight from here — plain <img src> tags cannot
+   send an Authorization header. The files themselves stay outside /api. */
+app.use('/uploads', express.static(config.uploadsDir, { index: false, maxAge: '7d' }))
 
 /* Baseline security headers. This is a JSON API (no HTML is served or framed),
    so a small, dependency-free set is enough and never blocks the SSE stream. */

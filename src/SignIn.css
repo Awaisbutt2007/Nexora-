@@ -625,7 +625,9 @@
 /* Toast Message */
 .auth-toast-alert {
   position: fixed;
-  bottom: 28px;
+  top: 24px;
+  right: 24px;
+  max-width: min(90vw, 420px);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -644,7 +646,7 @@
 @keyframes toastEntrance {
   from {
     opacity: 0;
-    transform: translateY(18px) scale(0.95);
+    transform: translateX(24px) scale(0.95);
   }
   to {
     opacity: 1;

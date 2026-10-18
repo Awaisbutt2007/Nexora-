@@ -495,6 +495,11 @@ function locateHead(data, W, H) {
     x1,
     y0: crown,
     y1: Math.min(H - 1, bottom + Math.round(faceW * 0.08)),
+    /* anatomy read for the lip-sync anchor: hairline → chin span + centre + width */
+    forehead: yTop,
+    chin,
+    cx,
+    faceW,
   }
 }
 
@@ -506,7 +511,7 @@ function locateHead(data, W, H) {
    the head ellipse is dropped — so no wall and no body ever becomes particles.
    colorOut: pass a Float32Array(count * 3) to receive each particle's source
    colour, so the point cloud reads as the real person instead of flat silver. */
-function photoTargets(img, count, { tolerance = 26, worldMax = 5.4, lift = 0.1, faceCrop = false, onBox = null, colorOut = null } = {}) {
+function photoTargets(img, count, { tolerance = 26, worldMax = 5.4, lift = 0.1, faceCrop = false, onBox = null, colorOut = null, mouthOut = null, jawOut = null } = {}) {
   const iw = img.naturalWidth || img.width
   const ih = img.naturalHeight || img.height
   if (!iw || !ih) throw new Error('empty image')
@@ -519,12 +524,28 @@ function photoTargets(img, count, { tolerance = 26, worldMax = 5.4, lift = 0.1, 
   c.drawImage(img, 0, 0, W, H)
   const { data } = c.getImageData(0, 0, W, H)
 
-  /* head box; when found, everything outside it is treated as background */
-  let head = faceCrop ? locateHead(data, W, H) : null
+  /* head box; when found, everything outside it is treated as background.
+     Detected once and reused: for the crop (faceCrop) AND for the mouth anchor
+     below (so the built-in portraits, which don't crop, still get lip-sync). */
+  const headDetect = locateHead(data, W, H)
+  let head = faceCrop ? headDetect : null
   if (faceCrop && !head) {
     /* nothing reliable detected — STILL never particle-ize the whole photo:
        fall back to an upper-centre window sized like a head */
     head = { x0: Math.round(W * 0.2), y0: 0, x1: Math.round(W * 0.8), y1: Math.round(H * 0.52) }
+  }
+  /* Mouth anchor in PIXEL space, from head anatomy (hairline → chin ≈ 0.73 of
+     the way down is the lips). Used to tag the particles that form the mouth. */
+  let mouthX = -1
+  let mouthY = -1
+  let mouthRX = 0
+  let mouthRY = 0
+  if (mouthOut && headDetect && headDetect.faceW) {
+    const fw = headDetect.faceW
+    mouthX = headDetect.cx
+    mouthY = headDetect.forehead + (headDetect.chin - headDetect.forehead) * 0.73
+    mouthRX = fw * 0.2
+    mouthRY = fw * 0.115
   }
   let cx0 = 0
   let cy0 = 0
@@ -725,16 +746,34 @@ function photoTargets(img, count, { tolerance = 26, worldMax = 5.4, lift = 0.1, 
     arr[i * 3 + 1] = -((py - cyPix) / cropH) * worldH + lift
     /* brightness fakes depth: lit areas push forward, shadows recede */
     arr[i * 3 + 2] = (luma - 0.5) * 1.1 + (Math.random() - 0.5) * 0.12
+    /* tag lip particles: soft elliptical falloff around the mouth anchor, and a
+       jaw flag so the render loop knows which half of the mouth to drop open */
+    if (mouthOut && mouthRX > 0) {
+      const ddx = (px - mouthX) / mouthRX
+      const ddy = (py - mouthY) / mouthRY
+      const dd = ddx * ddx + ddy * ddy
+      if (dd < 1) {
+        mouthOut[i] = Math.pow(1 - dd, 1.15)
+        if (jawOut) jawOut[i] = py > mouthY ? 1 : 0
+      }
+    }
   }
   return arr
 }
 
-export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl = null, onFaceBox = null }) {
+export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl = null, onFaceBox = null, state = 'idle' }) {
   const mountRef = useRef(null)
   const shapeRef = useRef(shape)
   shapeRef.current = shape
+  /* Behavioural state that drives the face's live motion:
+     'idle' breathing + sway · 'listening' lean-in · 'thinking' look-away · 'talking' lip-sync */
+  const stateRef = useRef(state)
+  stateRef.current = state
   const customTargetsRef = useRef(null)
   const customColorsRef = useRef(null)
+  /* per-particle mouth weight + jaw flag for the custom photo (parallel to targets) */
+  const customMouthRef = useRef(null)
+  const customJawRef = useRef(null)
   /* keep the caller in a ref: an inline prop function would otherwise re-run
      the photo-decode effect on every render */
   const onFaceBoxRef = useRef(onFaceBox)
@@ -747,6 +786,8 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
     if (!photoUrl) {
       customTargetsRef.current = null
       customColorsRef.current = null
+      customMouthRef.current = null
+      customJawRef.current = null
       onFaceBoxRef.current?.(null)
       return undefined
     }
@@ -754,6 +795,8 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
     img.onload = () => {
       if (cancelled) return
       const colorsOut = new Float32Array(count * 3)
+      const mouthOut = new Float32Array(count)
+      const jawOut = new Float32Array(count)
       try {
         customTargetsRef.current = photoTargets(img, count, {
           tolerance: 14,
@@ -761,15 +804,21 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
           lift: 0.12,
           faceCrop: true,
           colorOut: colorsOut,
+          mouthOut,
+          jawOut,
           onBox: (box) => { if (!cancelled) onFaceBoxRef.current?.(box) },
         })
         customColorsRef.current = colorsOut
+        customMouthRef.current = mouthOut
+        customJawRef.current = jawOut
       } catch {
         customTargetsRef.current = null
         customColorsRef.current = null
+        customMouthRef.current = null
+        customJawRef.current = null
       }
     }
-    img.onerror = () => { customTargetsRef.current = null; customColorsRef.current = null; onFaceBoxRef.current?.(null) }
+    img.onerror = () => { customTargetsRef.current = null; customColorsRef.current = null; customMouthRef.current = null; customJawRef.current = null; onFaceBoxRef.current?.(null) }
     img.src = photoUrl
     return () => { cancelled = true }
   }, [photoUrl, count])
@@ -905,6 +954,11 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
     /* null while the procedural grayscale portrait is in use → silver particles */
     let femaleColors = null
     let maleColors = null
+    /* per-particle mouth weight + jaw flag, parallel to each portrait's targets */
+    let femaleMouth = null
+    let femaleJaw = null
+    let maleMouth = null
+    let maleJaw = null
     let portraitsCancelled = false
     const loadImage = (src) =>
       new Promise((resolve) => {
@@ -918,13 +972,21 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
       try {
         if (fImg) {
           const fc = new Float32Array(count * 3)
-          femaleTargets = photoTargets(fImg, count, { tolerance: 14, colorOut: fc })
+          const fm = new Float32Array(count)
+          const fj = new Float32Array(count)
+          femaleTargets = photoTargets(fImg, count, { tolerance: 14, colorOut: fc, mouthOut: fm, jawOut: fj })
           femaleColors = fc
+          femaleMouth = fm
+          femaleJaw = fj
         }
         if (mImg) {
           const mc = new Float32Array(count * 3)
-          maleTargets = photoTargets(mImg, count, { tolerance: 14, colorOut: mc })
+          const mm = new Float32Array(count)
+          const mj = new Float32Array(count)
+          maleTargets = photoTargets(mImg, count, { tolerance: 14, colorOut: mc, mouthOut: mm, jawOut: mj })
           maleColors = mc
+          maleMouth = mm
+          maleJaw = mj
         }
       } catch { /* keep procedural targets */ }
     })
@@ -939,6 +1001,9 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
     let raf = 0
     let morphFactor = 0 /* 0 = orb, 1 = portrait */
     let spinY = 0
+    /* Eased "human" pose so a state change glides instead of snapping */
+    const pose = { turn: 0, tilt: 0, lean: 0 }
+    let mouthOpen = 0
     const clock = new THREE.Clock()
     const animate = () => {
       const elapsed = clock.getElapsedTime()
@@ -952,22 +1017,71 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
       /* A real photo tints every particle with the pixel it came from (skin,
          hair, lips); the orb and the procedural fallback keep their silver. */
       const tint = hasCustom ? customColorsRef.current : currentShape === 'female' ? femaleColors : currentShape === 'male' ? maleColors : null
+      /* Mouth weight + jaw flag for the active portrait — null on the orb and the
+         procedural fallback, so the mouth simply stays still until a photo lands. */
+      const mouth = hasCustom ? customMouthRef.current : currentShape === 'female' ? femaleMouth : currentShape === 'male' ? maleMouth : null
+      const jaw = hasCustom ? customJawRef.current : currentShape === 'female' ? femaleJaw : currentShape === 'male' ? maleJaw : null
 
-      /* Ease every particle toward its target — the "assembling" effect */
+      /* ---- behaviour → pose targets (blended in by morphFactor below) ---- */
+      const st = stateRef.current
+      let tTurn = 0
+      let tTilt = 0
+      let tLean = 0
+      let speech = 0
+      if (st === 'listening') { tLean = 0.5; tTilt = 0.06 }
+      else if (st === 'thinking') { tTurn = 0.55; tTilt = -0.12; tLean = -0.18 }
+      else if (st === 'talking') {
+        /* two detuned sines ≈ a natural syllable cadence (0..1) */
+        speech = Math.abs(Math.sin(elapsed * 10.5)) * 0.62 + Math.abs(Math.sin(elapsed * 6.7 + 1.1)) * 0.38
+        tLean = 0.12
+      }
+      pose.turn += (tTurn - pose.turn) * 0.06
+      pose.tilt += (tTilt - pose.tilt) * 0.06
+      pose.lean += (tLean - pose.lean) * 0.06
+      mouthOpen += (speech - mouthOpen) * 0.4
+
+      /* Ease every particle toward its target — the "assembling" effect — while the
+         mouth particles ride the speech envelope: the lower lip drops and eases
+         forward, the upper lip lifts a touch, so the face reads as actually talking. */
       const pos = cloudGeometry.attributes.position.array
       const col = cloudGeometry.attributes.color.array
-      for (let i = 0; i < pos.length; i += 1) {
-        pos[i] += (targets[i] - pos[i]) * 0.09
-        col[i] += ((tint ? tint[i] : orbColors[i]) - col[i]) * 0.09
+      const openAmt = mouthOpen * morphFactor
+      for (let p = 0; p < count; p += 1) {
+        const b = p * 3
+        let tx = targets[b]
+        let ty = targets[b + 1]
+        let tz = targets[b + 2]
+        if (mouth && openAmt > 0.001) {
+          const w = mouth[p]
+          if (w > 0) {
+            const amt = openAmt * w
+            if (jaw[p] === 1) { ty -= amt * 0.22; tz -= amt * 0.06 } else { ty += amt * 0.06 }
+          }
+        }
+        pos[b] += (tx - pos[b]) * 0.09
+        pos[b + 1] += (ty - pos[b + 1]) * 0.09
+        pos[b + 2] += (tz - pos[b + 2]) * 0.09
+        col[b] += ((tint ? tint[b] : orbColors[b]) - col[b]) * 0.09
+        col[b + 1] += ((tint ? tint[b + 1] : orbColors[b + 1]) - col[b + 1]) * 0.09
+        col[b + 2] += ((tint ? tint[b + 2] : orbColors[b + 2]) - col[b + 2]) * 0.09
       }
       cloudGeometry.attributes.position.needsUpdate = true
       cloudGeometry.attributes.color.needsUpdate = true
 
-      /* Spin only in orb mode; portrait mode turns slightly to the LEFT (3/4 view) */
+      /* Spin only in orb mode; portrait mode turns slightly to the LEFT (3/4 view).
+         Idle life: breathing (rise/fall) + sway (yaw) + a gentle nod (pitch), with a
+         livelier bob layered on while talking; lean/tilt/turn come from the state pose. */
       spinY += 0.0024
       const sideTurn = -0.3 - Math.sin(elapsed * 0.5) * 0.06
-      cloud.rotation.y = spinY * (1 - morphFactor) + sideTurn * morphFactor
-      cloud.rotation.x = Math.sin(elapsed * 0.25) * 0.12 * (1 - morphFactor)
+      const breath = Math.sin(elapsed * 1.15) * 0.03
+      const sway = Math.sin(elapsed * 0.45) * 0.035
+      const nod = Math.sin(elapsed * 0.9) * 0.02
+      const talkBob = st === 'talking' ? Math.sin(elapsed * 8.5) * 0.025 * mouthOpen : 0
+      cloud.rotation.y = spinY * (1 - morphFactor) + (sideTurn + pose.turn + sway) * morphFactor
+      cloud.rotation.x = Math.sin(elapsed * 0.25) * 0.12 * (1 - morphFactor) + (nod + talkBob) * morphFactor
+      cloud.rotation.z = (pose.tilt + Math.sin(elapsed * 0.6) * 0.012) * morphFactor
+      cloud.position.y = breath * morphFactor
+      cloud.position.z = pose.lean * 0.5 * morphFactor
 
       /* Core + ring shrink/fade away while the portrait forms */
       const orbPresence = Math.max(0.001, 1 - morphFactor * 1.25)

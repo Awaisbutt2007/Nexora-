@@ -38,6 +38,23 @@ export function authLimiter(req, res, next) {
   next()
 }
 
+/* Per-user throttle for expensive AI endpoints (chat completions, proactive,
+   tool runs). Credits cap total spend, but NOT request burst — this stops one
+   client from hammering the paid provider in a tight loop. Must run AFTER
+   requireAuth so req.user is available to key the bucket. */
+export function aiLimiter(req, res, next) {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown'
+  const who = req.user?.id || ip
+  const windowMs = config.aiRateWindowMs
+  if (!takeSlot(`ai:${who}|${ip}`, config.aiRateLimit, windowMs)) {
+    res.setHeader('Retry-After', Math.ceil(windowMs / 1000))
+    return res.status(429).json({
+      error: { message: 'You are sending requests too quickly — please slow down and try again in a moment.', type: 'rate_limited' },
+    })
+  }
+  next()
+}
+
 /* Light janitor: drop buckets whose newest hit already aged out of the window,
    so long-lived processes don't accumulate keys forever. */
 setInterval(() => {

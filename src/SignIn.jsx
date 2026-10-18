@@ -1,5 +1,5 @@
-import React, { useState } from 'react'
-import { googleLogin, login, register, saveSession } from './api/nexora.js'
+import React, { useRef, useState } from 'react'
+import { apiErrorText, googleLogin, login, register, saveSession } from './api/nexora.js'
 import './SignIn.css'
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
@@ -42,14 +42,17 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
   const [errors, setErrors] = useState({})
   const [shakeForm, setShakeForm] = useState(false)
 
-  // Toast feedback
+  // Toast feedback — one live timer: a new toast restarts the countdown instead of
+  // being dismissed early by the previous toast's timeout.
   const [toast, setToast] = useState('')
+  const toastTimer = useRef(0)
 
   const showToast = (msg) => {
+    clearTimeout(toastTimer.current)
     setToast(msg)
-    setTimeout(() => {
+    toastTimer.current = setTimeout(() => {
       setToast('')
-    }, 3200)
+    }, 5500)
   }
 
   const triggerShake = () => {
@@ -86,16 +89,14 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
     e.preventDefault()
     const newErrors = {}
 
+    // Open demo mode: any non-empty email/password gets in — format/length
+    // checks are off until real validation ships (backend AUTH_OPEN_MODE=0).
     if (!signInEmail.trim()) {
       newErrors.signInEmail = 'Email address is required'
-    } else if (!validateEmail(signInEmail)) {
-      newErrors.signInEmail = 'Please enter a valid email address'
     }
 
     if (!signInPassword) {
       newErrors.signInPassword = 'Password is required'
-    } else if (signInPassword.length < 6) {
-      newErrors.signInPassword = 'Password must be at least 6 characters'
     }
 
     if (Object.keys(newErrors).length > 0) {
@@ -116,7 +117,7 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
       finishAuth(data, 'Welcome back!')
     } catch (err) {
       triggerShake()
-      showToast(err.message || 'Sign in failed. Is the backend running?')
+      showToast(apiErrorText(err, 'Sign in failed. Is the backend running?'))
     } finally {
       setBusy(false)
     }
@@ -126,26 +127,17 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
     e.preventDefault()
     const newErrors = {}
 
+    // Same open demo relaxation as sign-in: presence only, no format/length rules.
     if (!signUpName.trim()) {
       newErrors.signUpName = 'Full Name is required'
-    } else if (signUpName.trim().length < 2) {
-      newErrors.signUpName = 'Name must be at least 2 characters'
     }
 
     if (!signUpEmail.trim()) {
       newErrors.signUpEmail = 'Email address is required'
-    } else if (!validateEmail(signUpEmail)) {
-      newErrors.signUpEmail = 'Please enter a valid email address'
-    }
-
-    if (signUpPhone.trim() && !/^[\d\s+\-()]{7,20}$/.test(signUpPhone.trim())) {
-      newErrors.signUpPhone = 'Please enter a valid phone number'
     }
 
     if (!signUpPassword) {
       newErrors.signUpPassword = 'Password is required'
-    } else if (signUpPassword.length < 6) {
-      newErrors.signUpPassword = 'Password must be at least 6 characters'
     }
 
     if (Object.keys(newErrors).length > 0) {
@@ -168,7 +160,7 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
       finishAuth(data, 'Account created — welcome to Nexora!', { source: 'signup' })
     } catch (err) {
       triggerShake()
-      showToast(err.message || 'Sign up failed. Is the backend running?')
+      showToast(apiErrorText(err, 'Sign up failed. Is the backend running?'))
     } finally {
       setBusy(false)
     }
@@ -205,7 +197,7 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
         })
       })
     } catch (err) {
-      showToast(err.message || 'Google sign-in failed.')
+      showToast(apiErrorText(err, 'Google sign-in failed.'))
     } finally {
       setBusy(false)
     }
@@ -230,7 +222,7 @@ export default function SignIn({ onBack, onLoginSuccess, targetLabel }) {
         'Demo mode ready — try Chat!',
       )
     } catch (err) {
-      showToast(err.message || 'Demo login failed. Start the backend first.')
+      showToast(apiErrorText(err, 'Demo login failed. Start the backend first.'))
     } finally {
       setBusy(false)
     }

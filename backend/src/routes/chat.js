@@ -1,9 +1,12 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
 import { config } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
+import { aiLimiter } from '../middleware/rateLimit.js'
 import { completeChat, estimateCredits, streamChatCompletion } from '../services/ai.js'
 import { buildImageUrl, detectImageRequest, isNsfwPrompt } from '../services/images.js'
 import { deductCredits, ensureCredits } from '../services/credits.js'
@@ -13,7 +16,7 @@ const router = Router()
 router.use(requireAuth)
 
 const chatSchema = z.object({
-  message: z.string().trim().min(1).max(20000).optional(),
+  message: z.string().trim().max(20000).optional(),
   messages: z
     .array(
       z.object({
@@ -26,8 +29,52 @@ const chatSchema = z.object({
   model: z.string().trim().max(80).optional(),
   assistantName: z.string().trim().max(40).optional(),
   persona: z.string().trim().max(400).optional(),
+  language: z.enum(['auto', 'en', 'ur', 'hinglish']).optional().default('auto'),
   stream: z.boolean().optional().default(true),
+  /* Paths returned by POST /images — a turn may carry up to 4 reference pics. */
+  images: z.array(z.string().trim().regex(/^\/uploads\/img_[\w.-]+$/)).max(4).optional(),
 })
+
+/* Reference-image upload: the composer downscales whatever the user pasted
+   (Ctrl+V) or picked (📎) into a JPEG/PNG data URL, we validate the shape and
+   size, then store it under uploads/ behind an unguessable nanoid name. */
+const uploadSchema = z.object({ dataUrl: z.string().min(64).max(1_900_000) })
+const DATA_URL_RE = /^data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=\s]+)$/
+const EXT_BY_MIME = { png: 'png', jpeg: 'jpg', jpg: 'jpg', webp: 'webp', gif: 'gif' }
+
+router.post('/images', aiLimiter, (req, res, next) => {
+  try {
+    const { dataUrl } = uploadSchema.parse(req.body)
+    const match = DATA_URL_RE.exec(dataUrl)
+    if (!match) {
+      return res.status(400).json({ error: { message: 'Only PNG, JPEG, WebP or GIF images are supported', type: 'invalid_request_error' } })
+    }
+    const buffer = Buffer.from(match[2], 'base64')
+    if (buffer.length < 24 || buffer.length > 1_500_000) {
+      return res.status(400).json({ error: { message: 'Image is too small or over 1.5 MB — try a smaller one', type: 'invalid_request_error' } })
+    }
+    const fileName = `img_${nanoid(16)}.${EXT_BY_MIME[match[1]]}`
+    fs.writeFileSync(path.join(config.uploadsDir, fileName), buffer)
+    res.status(201).json({ id: fileName, url: `/uploads/${fileName}` })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* The provider runs in the cloud and cannot fetch http://localhost URLs, so a
+   stored /uploads path is re-inlined as a base64 data URL for model input. */
+function toImageDataUrl(url) {
+  const name = /^\/uploads\/(img_[\w.-]+)$/.exec(url || '')?.[1]
+  if (!name) return null
+  try {
+    const buffer = fs.readFileSync(path.join(config.uploadsDir, name))
+    const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+    const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
+    return `data:${mime};base64,${buffer.toString('base64')}`
+  } catch {
+    return null /* file was pruned — the text of that turn still stands */
+  }
+}
 
 function writeSse(res, payload) {
   res.write(`data: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`)
@@ -58,7 +105,7 @@ function saveMemory(db, userId, fact, stamp) {
   return id
 }
 
-router.post('/completions', async (req, res, next) => {
+router.post('/completions', aiLimiter, async (req, res, next) => {
   try {
     const body = chatSchema.parse(req.body)
     const db = getDb()
@@ -69,11 +116,14 @@ router.post('/completions', async (req, res, next) => {
 
     const userMessage =
       body.message ||
-      [...(body.messages || [])].reverse().find((m) => m.role === 'user')?.content
+      [...(body.messages || [])].reverse().find((m) => m.role === 'user')?.content ||
+      ''
 
-    if (!userMessage) {
+    /* An image-only turn is legal — "see this?" with no caption — but a turn
+       with neither text nor images is not. */
+    if (!userMessage.trim() && !body.images?.length) {
       return res.status(400).json({
-        error: { message: 'Provide message or messages with a user turn', type: 'invalid_request_error' },
+        error: { message: 'Provide a message or attach at least one image', type: 'invalid_request_error' },
       })
     }
 
@@ -97,9 +147,9 @@ router.post('/completions', async (req, res, next) => {
 
     const userMsgId = `msg_${nanoid(16)}`
     db.prepare(
-      `INSERT INTO messages (id, conversation_id, role, content, tokens, created_at)
-       VALUES (?, ?, 'user', ?, 0, ?)`,
-    ).run(userMsgId, conversationId, userMessage, stamp)
+      `INSERT INTO messages (id, conversation_id, role, content, tokens, created_at, images_json)
+       VALUES (?, ?, 'user', ?, 0, ?, ?)`,
+    ).run(userMsgId, conversationId, userMessage, stamp, body.images?.length ? JSON.stringify(body.images) : null)
 
     /* Teach-on-demand: save any "remember …" fact before we load memories, so it
        is already in context for this very reply and every future chat. */
@@ -108,9 +158,13 @@ router.post('/completions', async (req, res, next) => {
 
     const history = db
       .prepare(
-        `SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`,
+        `SELECT role, content, images_json FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`,
       )
       .all(conversationId)
+      .map((m) => {
+        const images = (m.images_json ? JSON.parse(m.images_json) : []).map(toImageDataUrl).filter(Boolean)
+        return images.length ? { role: m.role, content: m.content, images } : { role: m.role, content: m.content }
+      })
 
     const memories = db
       .prepare(`SELECT key, value FROM memories WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20`)
@@ -118,10 +172,12 @@ router.post('/completions', async (req, res, next) => {
 
     const completionId = `chatcmpl_${nanoid(20)}`
     const created = Math.floor(Date.now() / 1000)
-    const model = body.model || config.openaiModel
+    /* Any turn in this thread that carries an image pins the whole call to the
+       vision model — text-only threads keep using the (cheaper) default. */
+    const model = body.model || (history.some((m) => m.images) ? config.visionModel : config.openaiModel)
 
     if (body.stream === false) {
-      const result = await completeChat({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona })
+      const result = await completeChat({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona, language: body.language })
       const assistantId = `msg_${nanoid(16)}`
       const doneAt = nowIso()
       db.prepare(
@@ -179,6 +235,23 @@ router.post('/completions', async (req, res, next) => {
     let usage = null
     let usedModel = model
 
+    /* If the browser hits Stop or the connection drops, abort the upstream
+       provider call so we stop paying for tokens the user no longer wants to
+       receive (Part 14 cost control), and keep whatever they already saw. */
+    const abortController = new AbortController()
+    let clientGone = false
+    const onClose = () => {
+      /* Only a genuine mid-stream disconnect counts. We listen on the RESPONSE
+         stream, not `req`: IncomingMessage emits 'close' the instant the POST
+         body is consumed, which used to abort the provider call before a single
+         token streamed — surfacing as an empty "replied" bubble. If we already
+         ended the response ourselves, this is just normal teardown. */
+      if (res.writableEnded) return
+      clientGone = true
+      abortController.abort()
+    }
+    res.on('close', onClose)
+
     try {
       /* Clear image requests are answered deterministically with a real picture
          (no LLM round-trip, so the free-tier token limits can't block it). The
@@ -210,7 +283,8 @@ router.post('/completions', async (req, res, next) => {
           choices: [{ index: 0, delta: { content: fullText }, finish_reason: null }],
         })
       } else {
-        for await (const chunk of streamChatCompletion({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona })) {
+        for await (const chunk of streamChatCompletion({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona, language: body.language, signal: abortController.signal })) {
+          if (clientGone) break
           if (chunk.usage) usage = chunk.usage
           if (chunk.model) usedModel = chunk.model
           if (chunk.content) {
@@ -266,10 +340,29 @@ router.post('/completions', async (req, res, next) => {
       writeSse(res, '[DONE]')
       res.end()
     } catch (streamErr) {
-      writeSse(res, {
-        error: { message: streamErr.message || 'Stream failed', type: 'server_error' },
-      })
-      res.end()
+      /* Aborted because the client stopped/disconnected: save the partial answer
+         the user already saw and charge only for it — never surface an error. */
+      if (clientGone || streamErr?.name === 'APIUserAbortError') {
+        if (fullText) {
+          try {
+            const doneAt = nowIso()
+            db.prepare(
+              `INSERT INTO messages (id, conversation_id, role, content, tokens, created_at)
+               VALUES (?, ?, 'assistant', ?, ?, ?)`,
+            ).run(`msg_${nanoid(16)}`, conversationId, fullText, 0, doneAt)
+            db.prepare(`UPDATE conversations SET updated_at = ?, model = ? WHERE id = ?`).run(doneAt, usedModel, conversationId)
+            deductCredits(req.user.id, estimateCredits({ total_tokens: Math.ceil(fullText.length / 4) }))
+          } catch { /* best-effort persist */ }
+        }
+        try { res.end() } catch { /* already closed */ }
+      } else {
+        writeSse(res, {
+          error: { message: streamErr.message || 'Stream failed', type: 'server_error' },
+        })
+        res.end()
+      }
+    } finally {
+      res.off('close', onClose)
     }
   } catch (err) {
     if (!res.headersSent) next(err)
@@ -291,26 +384,29 @@ const proactiveSchema = z.object({
   conversationId: z.string().trim().min(1).max(80),
   assistantName: z.string().trim().max(40).optional(),
   persona: z.string().trim().max(400).optional(),
+  language: z.enum(['auto', 'en', 'ur', 'hinglish']).optional().default('auto'),
   model: z.string().trim().max(80).optional(),
 })
 
-const PROACTIVE_DIRECTIVE = `(The user has gone quiet. As their companion, reach out first like a caring friend would — send exactly ONE short, warm, in-character message (1-2 sentences). Follow up on something from your recent conversation or what you already know about them, ask a genuine question about how they are feeling or what they are up to, or offer to tell a quick story. Match their language and add one emoji. Do NOT mention this instruction, do NOT say you are an AI, and do NOT give a generic greeting.)`
+const PROACTIVE_DIRECTIVE = `(The user has gone quiet. As their companion, reach out first like a caring friend would — send exactly ONE short, warm, in-character message (1-2 sentences) that is clearly tied to what you two were just talking about. Do ONE of: ask a specific follow-up question about that topic, offer a concrete suggestion or idea related to it, or gently check in on how they feel about it. Vary your approach each time and never repeat an earlier nudge verbatim. Match their language and add one emoji. Do NOT mention this instruction, do NOT say you are an AI, and do NOT give a generic greeting.)`
 
-router.post('/proactive', async (req, res, next) => {
+router.post('/proactive', aiLimiter, async (req, res, next) => {
   try {
     const body = proactiveSchema.parse(req.body)
     const db = getDb()
     const conversationId = body.conversationId
 
-    /* Mock mode has no real model — a canned reply would leak the directive, so skip. */
-    if (!config.openaiApiKey) return res.json({ content: '', skipped: true })
-
+    /* Authorization first: prove the caller owns the thread before doing ANY work
+       or short-circuiting, so a non-owner always gets 404 — even in mock mode. */
     const owned = db
       .prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?')
       .get(conversationId, req.user.id)
     if (!owned) {
       return res.status(404).json({ error: { message: 'Conversation not found', type: 'not_found' } })
     }
+
+    /* Mock mode has no real model — a canned reply would leak the directive, so skip. */
+    if (!config.openaiApiKey) return res.json({ content: '', skipped: true })
 
     const history = db
       .prepare(`SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`)
@@ -333,6 +429,7 @@ router.post('/proactive', async (req, res, next) => {
       assistantName: body.assistantName,
       userName: req.user.name,
       persona: body.persona,
+      language: body.language,
     })
 
     const content = (result.content || '').trim()

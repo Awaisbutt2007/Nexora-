@@ -57,9 +57,13 @@ stops changing, return the raw text verbatim. Never ask it for a screenshot.
 | Reading stylesheet rules | exact `selectorText` equality (PostCSS reformats it) | computed style on a real element |
 | Statements starting with `[` | `say('x')` then a newline then `[...list].find(...)` — parsed as an index access | bind to a `const` first |
 
-## Reaching the workspace without a working backend
+## Reaching the workspace in the harness
 
-Write a fake session into `localStorage` before loading `/`:
+Prefer the real path: the harness is served by the same Vite dev server as the app, so
+requests are relative `/api` and proxied — click **Continue as Demo** (backend on `:8787`)
+and a normal session lands in `localStorage`. No `CORS_ORIGIN` editing is involved any more.
+
+Only if the backend is genuinely unavailable, stub the session before loading `/`:
 
 ```js
 localStorage.setItem('nexora_user_session', JSON.stringify({
@@ -69,9 +73,10 @@ localStorage.setItem('nexora_user_session', JSON.stringify({
 }))
 ```
 
-`me(token)` then fails on CORS as a *network* error (not 401), so the app's cached-session
-branch keeps the workspace open. A real "Continue as Demo" login needs both the backend on
-`:8787` **and** the harness origin whitelisted in `CORS_ORIGIN`.
+That works only while `me(token)` cannot answer: a network failure or the proxy's empty
+**502** falls through to the cached-session branch and keeps the workspace open. With the
+backend running, a fake token is a real **401**, which clears the session and drops the
+harness back to Sign In — so use the demo login instead of the stub.
 
 ## Reporting
 
