@@ -1,6 +1,6 @@
 ---
 name: particle-portrait-engine
-description: How Nexora's photo-based particle portraits work in src/NanoParticles.jsx — the sampling pipeline, background peeling, model-free head location, per-particle colour rules and the AdditiveBlending constraint. Use when changing the 3D particle effects, when a face/hair/body comes out hollow or missing, or when tuning portrait density and realism.
+description: How Nexora's photo-based particle portraits work in src/NanoParticles.jsx — the sampling pipeline, background peeling, model-free head location, per-particle colour rules and the per-mode blending rule (portraits paint with NormalBlending, the orb glows with AdditiveBlending). Use when changing the 3D particle effects, when a face/hair/body comes out hollow or missing, when a portrait looks flat silver instead of showing skin tones, or when tuning portrait density and realism.
 ---
 
 # Particle Portrait Engine
@@ -49,13 +49,22 @@ never the whole photo.
 
 ## Colour rules
 
-- Hue and chroma are preserved exactly (vibrance 1.22); only brightness is re-curled:
-  `level = 0.3 + 0.65 * luma^0.55`, clamped to `[0.05, 0.98]`.
-- **The clamp is not cosmetic:** the material uses `THREE.AdditiveBlending`, so a literal
-  dark-hair pixel renders invisible and re-opens holes in the portrait.
+- **Blending is per mode, and it is the whole reason portraits look real.** In `animate()`
+  the cloud material's `blending` is flipped by the `portrait` boolean: portraits use
+  `THREE.NormalBlending` (paints each particle's actual pigment, so skin reads warm peach,
+  lips red, hair brown); the silver orb keeps `THREE.AdditiveBlending` (overlapping light
+  sums to a glow). Additive CANNOT show skin tone — dense skin sums every channel to white.
+- `toneParticleColor()` therefore keeps the photo's real colour and only nudges it:
+  vibrance `sat = 1.28`, then a gamma shadow-lift `0.1 + 0.92 * v^0.85` so dark hair reads
+  as brown rather than vanishing into the black backdrop. There is deliberately **no `/luma`
+  equalisation** — that old trick only existed to keep hair visible under additive and it is
+  exactly what blew skin out to white.
 - `animate()` eases the geometry `color` attribute toward `colorOut` (or back to the
   seeded silver `orbColors` when a shape has none) and sets `needsUpdate`. The orb itself
   stays silver.
+- Because NormalBlending has no glow to fill the gaps between dots, portrait particles
+  render thicker (`cloudMaterial.size = 0.028 + morphFactor * 0.03`) so the dots knit into
+  solid skin instead of leaving black backdrop showing through.
 
 ## Portrait framing invariants
 
@@ -80,7 +89,7 @@ counts classes, then report the numbers:
 | Symptom | Cause |
 | --- | --- |
 | hollow ring where the face should be | flood fill walked through smooth skin → `keep(p)` missing or `faceCrop` off |
-| hair missing / see-through | rescue threshold too high, or brightness clamp floor raised |
+| hair missing / see-through | rescue threshold too high, or the shadow-lift floor lowered so dark hair paints black-on-black |
 | wall pulled in as foreground | rescue not bounded by backdrop luma |
 | chin cut at the moustache | run collapse used as the chin instead of a floor |
 | face too small in frame | `onBox` crop not fed to the DP zoom |

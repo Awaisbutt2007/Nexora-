@@ -33,7 +33,7 @@ A CI/CD gate, a privacy-safe local secret scanner, a tracked-file guard, an aggr
 | F2 | **Medium** | Authorization-after-work: mock short-circuit ran before ownership check | `backend/src/routes/chat.js` `/proactive` | Code defect; no data leaked (returned empty). **Fixed.** |
 | F3 | **Low** | Public Google OAuth **client ID** committed to Git history | root `.env` @ commits `dfb485b`, `7d9393c` (later deleted) | **Public** (repo is public) — but client IDs are non-secret by design |
 | F4 | **Low / informational** | Hardcoded **test-only** JWT dummy | `backend/test/api.test.mjs:19` (`nexora-test-secret`); `backend/test/security.test.mjs` | Committed but a non-secret fixture; scanner is placeholder-aware |
-| F5 | **Low** | `/health` (unauthenticated) reports AI mode, model name & voice model | `backend/src/index.js` `/health` | Public info disclosure (no secrets) — accepted tradeoff; flagged for review |
+| F5 | **Low** | `/health` (unauthenticated) reports AI mode, model name & voice model | `backend/src/index.js` `/health` | **Fixed:** the probe now reports readiness only (`ai: live\|text-only\|mock`, a reason-shaped `voice` field); the engine id, voice model and base URL moved behind `HEALTH_VERBOSE=1`. The same class of leak was closed on the chat SSE chunks, the non-streaming body, the conversation rows, the tool-run payload and the voice-token response — all now say `nexora` via `publicModelLabel()`. Asserted in `test/security.test.mjs`. |
 | F6 | **Informational** | `POST /api/user/upgrade` grants any plan with no payment verification | `backend/src/routes/user.js` `/upgrade` | Self-account only (horizontal); a product/business gap, not a token/auth bypass |
 
 No Critical findings were identified.
@@ -133,7 +133,8 @@ No user data, screenshots, working features, or existing configuration were dele
 1. **Google OAuth client origin allow-listing** *(Low)* — confirm the client ID at `console.cloud.google.com` restricts **Authorized JavaScript origins** to your real frontend origin(s) and that no browser key/secret is attached. Client IDs are public; the protection is origin scoping + (for installed/web) the redirect URI allow-list.
 2. **Public repo surface** *(process)* — anyone can read code + history. Before enabling the CI, note that `.github/workflows/security.yml` will run on public forks on PRs; keep any future **private** secret out of workflow logs. Rotate anything you ever paste into an issue/PR comment.
 3. **Real `.env` values** *(hygiene)* — `backend/.env` (OpenAI key, prod JWT) and `desktop-agent/.env` (`AGENT_SECRET`) are untracked but exist on disk. Ensure they are **not** included in any manual zip/upload, and that hosting injects them via the platform secret store (never committed). Confirm the OpenAI key has a spend limit / is a least-privilege key.
-4. **`/health` disclosure** *(accept or harden)* — optionally gate the `ai/model/voice` fields to non-production. Low risk.
+4. **`/health` disclosure** *(hardened)* — readiness only by default; the AI/voice model
+   fields now require `HEALTH_VERBOSE=1`, which must stay unset in any public deploy.
 5. **Plan upgrade without payment** *(business)* — `POST /api/user/upgrade` needs no payment gate; acceptable until billing exists, but add real authorization/verification before charging money.
 6. **Multi-instance scaling** *(future)* — the in-memory auth & voice rate limiters reset per process and don't share state; move to Redis if you run more than one instance.
 7. **Pre-commit hook** *(recommended)* — wire `npm run security:check` into a local hook (e.g. Husky `pre-commit`) so leaks are blocked before they reach CI.

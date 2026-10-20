@@ -62,13 +62,37 @@ New scrollable surfaces must join that selector list.
   `::after` (a pseudo-element can only blink, not travel). See
   `browser-layout-verification` for the measurement rules that keep it pixel-accurate.
 
+### Companion settings live on the account, not just localStorage
+
+The five Settings choices (`voice`, `language`, `assistantName`, `persona`, `gender`) are
+stored per-origin in `localStorage['nexora_voice_prefs']` **and** on the user row
+(`users.prefs_json`). localStorage alone was the bug: it is per-origin and cleared on
+logout, so opening `:8787` after saving on `:5173` silently reset a user's "Urdu first"
+back to `auto`, and Hinglish replies looked like the setting was ignored.
+
+- `voicePrefs` is **derived**, not set in an effect:
+  `const voicePrefs = useMemo(() => loadVoicePrefs(localPrefs, userProfile?.prefs), [localPrefs, userProfile?.prefs])`.
+  `loadVoicePrefs(local, account)` merges local under the account copy (account wins) and
+  re-validates every field, so a hand-edited blob can't push a bad `language` into the
+  chat schema. Deriving it (instead of `setState` in an effect) is what keeps oxlint's
+  `set-state-in-effect` / `exhaustive-deps` warnings at the baseline.
+- `persistVoicePrefs(next)` writes local state + localStorage, then pushes to the server via
+  `updateProfile(token, { prefs })` when logged in. Only the five payload keys are sent
+  (`voicePrefsPayload`).
+- **Read before you write on first run.** When the cached profile has no saved prefs, the
+  sync effect must call `me(token)` first: if the server already has prefs, hydrate from
+  them (`onProfileUpdate`) and do nothing else. Pushing local defaults blindly overwrote a
+  saved `language:'ur'` with `'auto'`. Guard with a `prefsPushedRef` keyed on user id so it
+  runs at most once per account, and swallow the `catch` (offline — the next edit retries).
+
 ## Lint (oxlint) rules that actually bite
 
 - `react(purity)`: no `Date.now()`, `Math.random()` or `window.*` reads inside render or
   event handlers — move them into an effect/listener body (this also fixed a real bug:
   the scroll-spy lock is now armed by `hashchange`, which covers keyboard and middle
   click too).
-- Baseline is **6 warnings / 0 errors**. Do not add to it.
+- Baseline is **11 warnings / 0 errors** (up from 6 as features landed). Do not add to it —
+  prefer derived `useMemo` state over `setState` in an effect, and complete every deps array.
 
 ## Accessibility
 

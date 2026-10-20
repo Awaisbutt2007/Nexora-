@@ -1,13 +1,14 @@
 /**
  * Thin Nexora API client (ChatGPT-style streaming chat).
- * Backend default: http://localhost:8787
+ * Every request is same-origin unless VITE_API_URL says otherwise.
  */
-/* In development the page's own dev server proxies /api and /uploads to the backend
-   (see vite.config.js), so requests are SAME-ORIGIN: no port rollover, LAN address or
-   localhost-vs-127.0.0.1 mix-up can produce a CORS "Failed to fetch" that reads like a
-   wrong password. Set VITE_API_URL to aim somewhere else and the absolute URL wins. */
-const API_BASE = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' : 'http://localhost:8787')
-const API_LABEL = API_BASE || 'the backend (proxied at /api by this page\'s dev server)'
+/* One rule for every surface: the page talks to whatever served it. Dev and `npm run preview`
+   proxy /api and /uploads to the backend (vite.config.js), and a production build is HOSTED by
+   that same backend (backend/src/index.js serves dist/), so no port rollover, LAN address,
+   phone or stale tab can ever trip CORS — the failure class that read as "Failed to fetch"
+   while creating an account. Set VITE_API_URL only when the frontend is deployed apart from
+   its API (then the backend must list that origin in CORS_ORIGIN). */
+const API_BASE = import.meta.env.VITE_API_URL ?? ''
 const SESSION_KEY = 'nexora_user_session'
 
 function authHeaders(token) {
@@ -19,7 +20,13 @@ function authHeaders(token) {
 
 /** The one instruction every "the API is not answering" path should end with. */
 function backendUnreachableText() {
-  return `Can't reach ${API_LABEL}. Start it with "npm run dev:all" (backend on port 8787) and try again.`
+  if (API_BASE) {
+    return `Can't reach ${API_BASE}. Start that API with "npm run dev:api" (port 8787) and try again.`
+  }
+  const how = import.meta.env.DEV
+    ? 'nothing answered the /api requests this page proxies to port 8787'
+    : 'the backend that serves this page is not running'
+  return `Can't reach the Nexora API — ${how}. Run "npm run dev:all", then reload this page.`
 }
 
 /** A fetch that never reached the server (backend down, or CORS refused the port the
@@ -71,6 +78,10 @@ export function mapUser(user) {
     plan: user.plan,
     creditsRemaining: user.creditsRemaining,
     isPremium: Boolean(user.isPremium),
+    /* Companion choices (reply language, voice, name, persona, face) saved on the
+       account — the workspace hydrates from it so the setting follows the user to
+       any origin or device instead of silently resetting to 'auto'. */
+    prefs: user.prefs && typeof user.prefs === 'object' ? user.prefs : null,
     // Demo flag is set client-side; survive /me refreshes via the demo email
     isDemo: Boolean(user.isDemo) || user.email === 'demo@nexora.ai',
   }
@@ -204,6 +215,19 @@ export async function deleteAllConversations(token) {
   return parseJson(res)
 }
 
+/** Hang self-captured screenshots (/uploads paths from uploadChatImage) on an
+ *  assistant turn so the picture is part of the thread and not just a live trick.
+ *  `markers` are the [SCREENSHOT:…] lines actually fulfilled, so the caption survives
+ *  a reload even when the model never wrote one. */
+export async function attachMessageImages(token, conversationId, messageId, images, markers) {
+  const res = await fetch(`${API_BASE}/api/conversations/${conversationId}/messages/${messageId}`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify({ images, ...(markers?.length ? { markers } : {}) }),
+  })
+  return parseJson(res)
+}
+
 export async function upgradePlan(token, plan = 'pro') {
   const res = await fetch(`${API_BASE}/api/user/upgrade`, {
     method: 'POST',
@@ -226,11 +250,11 @@ export async function runTool(token, toolId, { prompt, input, assistantName, per
  * Stream chat like ChatGPT (SSE). Calls onDelta(textChunk) for each piece.
  * Returns { conversationId, fullText }.
  */
-export async function streamChat({ token, message, conversationId = null, assistantName, persona, language, images, onDelta, onMeta, signal }) {
+export async function streamChat({ token, message, conversationId = null, assistantName, persona, gender, language, images, replyTo, replyToText, onDelta, onMeta, signal }) {
   const res = await fetch(`${API_BASE}/api/chat/completions`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ message, conversationId, assistantName, persona, language, images, stream: true }),
+    body: JSON.stringify({ message, conversationId, assistantName, persona, gender, language, images, replyTo, replyToText, stream: true }),
     signal,
   })
 
@@ -290,12 +314,15 @@ export async function streamChat({ token, message, conversationId = null, assist
  * Ask Aira to reach out first with one short, in-character check-in when the user
  * has gone quiet. Best-effort: returns { content, skipped } — empty content means
  * there was nothing to send (mock mode, or the last turn wasn't the assistant's).
+ * `composing` / `withdrewDraft` describe what the composer was doing when the clock
+ * ran out, so she can ask about a half-written message instead of ignoring it.
+ * Flags only — the draft's text never leaves the page.
  */
-export async function proactiveChat({ token, conversationId, assistantName, persona, language }) {
+export async function proactiveChat({ token, conversationId, assistantName, persona, gender, language, composing, withdrewDraft }) {
   const res = await fetch(`${API_BASE}/api/chat/proactive`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ conversationId, assistantName, persona, language }),
+    body: JSON.stringify({ conversationId, assistantName, persona, gender, language, ...(composing ? { composing: true } : {}), ...(withdrewDraft ? { withdrewDraft: true } : {}) }),
   })
   return parseJson(res)
 }
@@ -317,15 +344,17 @@ async function parseJson(res) {
 
 /**
  * Mint a short-lived realtime client secret (server-side key stays hidden).
- * Returns { clientSecret, sessionId, model, voice, maxSeconds, history, ... }.
+ * Returns { clientSecret, sessionId, voice, maxSeconds, history, ... } — deliberately
+ * no provider or model name: the client authenticates with the secret, and the engine
+ * behind a call is not information the browser (or its network tab) needs.
  * Rejects with a clear message when the backend has no real API key — the app
  * never plays placeholder audio.
  */
-export async function requestVoiceToken(token, { voice, language, assistantName, persona, conversationId } = {}) {
+export async function requestVoiceToken(token, { voice, language, assistantName, persona, gender, conversationId } = {}) {
   const res = await fetch(`${API_BASE}/api/voice/realtime/token`, {
     method: 'POST',
     headers: authHeaders(token),
-    body: JSON.stringify({ voice, language, assistantName, persona: persona || undefined, conversationId: conversationId || null }),
+    body: JSON.stringify({ voice, language, assistantName, persona: persona || undefined, gender, conversationId: conversationId || null }),
   })
   return parseJson(res)
 }
@@ -357,6 +386,56 @@ export async function saveMemory(token, { key, value, source }) {
 export async function deleteMemory(token, id) {
   const res = await fetch(`${API_BASE}/api/memory/${id}`, { method: 'DELETE', headers: authHeaders(token) })
   if (res.status === 204) return { ok: true }
+  return parseJson(res)
+}
+
+/* Scheduled tasks ("Schedule" section): plain CRUD plus the reminder pair —
+   POST /reminders asks what needs saying right now (day-before + day-of), and
+   the app immediately acks so the same nudge never fires twice per phase. */
+export async function listSchedule(token) {
+  const res = await fetch(`${API_BASE}/api/schedule`, { headers: authHeaders(token) })
+  return parseJson(res)
+}
+
+export async function createScheduleTask(token, { title, notes, dueAt }) {
+  const res = await fetch(`${API_BASE}/api/schedule`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ title, notes, dueAt }),
+  })
+  return parseJson(res)
+}
+
+export async function updateScheduleTask(token, id, patch) {
+  const res = await fetch(`${API_BASE}/api/schedule/${id}`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify(patch),
+  })
+  return parseJson(res)
+}
+
+export async function deleteScheduleTask(token, id) {
+  const res = await fetch(`${API_BASE}/api/schedule/${id}`, { method: 'DELETE', headers: authHeaders(token) })
+  if (res.status === 204) return { ok: true }
+  return parseJson(res)
+}
+
+export async function fetchScheduleReminders(token, meta) {
+  const res = await fetch(`${API_BASE}/api/schedule/reminders`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify(meta),
+  })
+  return parseJson(res)
+}
+
+export async function ackScheduleReminders(token, ids) {
+  const res = await fetch(`${API_BASE}/api/schedule/reminders/ack`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ ids }),
+  })
   return parseJson(res)
 }
 

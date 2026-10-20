@@ -3,12 +3,13 @@ import path from 'node:path'
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
-import { config } from '../config.js'
+import { config, REPLY_LANGUAGES, REPLY_LANGUAGE_NAMES, publicModelLabel } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
 import { aiLimiter } from '../middleware/rateLimit.js'
 import { completeChat, estimateCredits, streamChatCompletion } from '../services/ai.js'
-import { buildImageUrl, detectImageRequest, isNsfwPrompt } from '../services/images.js'
+import { detectImageRequest, imageProxyPath, isNsfwPrompt, isSelfUiRequest } from '../services/images.js'
+import { safeProviderMessage } from '../services/providerErrors.js'
 import { deductCredits, ensureCredits } from '../services/credits.js'
 import { titleFromPrompt } from './conversations.js'
 
@@ -26,13 +27,20 @@ const chatSchema = z.object({
     )
     .optional(),
   conversationId: z.string().optional().nullable(),
-  model: z.string().trim().max(80).optional(),
+  /* No `model` key: which engine answers is decided here, not by the caller. A client
+   could previously name any model and the server would pay for it. */
   assistantName: z.string().trim().max(40).optional(),
   persona: z.string().trim().max(400).optional(),
-  language: z.enum(['auto', 'en', 'ur', 'hinglish']).optional().default('auto'),
+  gender: z.enum(['female', 'male']).optional(),
+  language: z.enum(REPLY_LANGUAGES).optional().default('auto'),
   stream: z.boolean().optional().default(true),
   /* Paths returned by POST /images — a turn may carry up to 4 reference pics. */
   images: z.array(z.string().trim().regex(/^\/uploads\/img_[\w.-]+$/)).max(4).optional(),
+  /* Reply threading: the id of the turn being answered plus the text quoted from it.
+     Only the id is trusted (it is re-checked against the thread) and only the id is
+     saved; the quote becomes a model-only annotation. */
+  replyTo: z.string().trim().max(80).optional(),
+  replyToText: z.string().trim().max(4000).optional(),
 })
 
 /* Reference-image upload: the composer downscales whatever the user pasted
@@ -80,6 +88,9 @@ function writeSse(res, payload) {
   res.write(`data: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`)
 }
 
+/* What the browser is allowed to know about the engine: nothing — see publicModelLabel()
+   in config.js, which is the single place that decides it. */
+
 /* "remember …" / "yad rakho …" — a lightweight, deterministic way for the user to
    teach the assistant, matching the onboarding promise. No LLM round-trip needed. */
 const REMEMBER_RE = /(?:\bremember(?:\s+that)?\b|\bkeep\s+in\s+mind\b|\bnote\s+that\b|\bsave\s+that\b|\by[ae]d\s+ra[kc]ho\b|\bya?ad\s+ra[kc]h\b)\s*[-:]?\s*(.+)/i
@@ -103,6 +114,27 @@ function saveMemory(db, userId, fact, stamp) {
     `INSERT INTO memories (id, user_id, key, value, source, created_at, updated_at) VALUES (?, ?, ?, ?, 'user', ?, ?)`,
   ).run(id, userId, key, fact, stamp, stamp)
   return id
+}
+
+/* Reply threading: when the user answers one specific earlier turn, that turn's
+   text rides along as an annotation on their message so even a long thread keeps
+   the answer pointed at the right bubble. The transcript still stores exactly what
+   the user typed — the annotation is built for the model only, never saved. */
+function annotateReplyTo(history, quote, assistantName) {
+  if (!quote) return history
+  const clean = quote.replace(/\s+/g, ' ').slice(0, 1200)
+  const out = [...history]
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i].role !== 'user') continue
+    out[i] = {
+      ...out[i],
+      content: `(The user is replying to this earlier ${assistantName || 'assistant'} message:
+"""${clean}"""
+Answer that reply — stay tied to the message they quoted.)\n\n${out[i].content}`,
+    }
+    break
+  }
+  return out
 }
 
 router.post('/completions', aiLimiter, async (req, res, next) => {
@@ -146,10 +178,15 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
     }
 
     const userMsgId = `msg_${nanoid(16)}`
+    /* Never trust a client-supplied id: the reply target only counts if it is a real
+       message of this very thread, otherwise the quote alone still steers the model. */
+    const replyTarget = body.replyTo
+      ? db.prepare('SELECT id FROM messages WHERE id = ? AND conversation_id = ?').get(body.replyTo, conversationId)?.id || null
+      : null
     db.prepare(
-      `INSERT INTO messages (id, conversation_id, role, content, tokens, created_at, images_json)
-       VALUES (?, ?, 'user', ?, 0, ?, ?)`,
-    ).run(userMsgId, conversationId, userMessage, stamp, body.images?.length ? JSON.stringify(body.images) : null)
+      `INSERT INTO messages (id, conversation_id, role, content, tokens, created_at, images_json, reply_to)
+       VALUES (?, ?, 'user', ?, 0, ?, ?, ?)`,
+    ).run(userMsgId, conversationId, userMessage, stamp, body.images?.length ? JSON.stringify(body.images) : null, replyTarget)
 
     /* Teach-on-demand: save any "remember …" fact before we load memories, so it
        is already in context for this very reply and every future chat. */
@@ -162,6 +199,11 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
       )
       .all(conversationId)
       .map((m) => {
+        /* Only the USER's pictures go to the model. Her own self-screenshots are
+           stored on assistant turns for the thread, but re-inlining them would both
+           break the provider's role rules (see services/ai.js) and add tens of KB of
+           base64 the reply does not need. */
+        if (m.role !== 'user') return { role: m.role, content: m.content }
         const images = (m.images_json ? JSON.parse(m.images_json) : []).map(toImageDataUrl).filter(Boolean)
         return images.length ? { role: m.role, content: m.content, images } : { role: m.role, content: m.content }
       })
@@ -170,14 +212,19 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
       .prepare(`SELECT key, value FROM memories WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20`)
       .all(req.user.id)
 
+    /* What the model sees, as opposed to what the thread stores: the quoted target is
+       folded into the newest user turn so a pointed reply stays pointed. */
+    const modelHistory = annotateReplyTo(history, body.replyToText, body.assistantName)
+
     const completionId = `chatcmpl_${nanoid(20)}`
     const created = Math.floor(Date.now() / 1000)
-    /* Any turn in this thread that carries an image pins the whole call to the
-       vision model — text-only threads keep using the (cheaper) default. */
-    const model = body.model || (history.some((m) => m.images) ? config.visionModel : config.openaiModel)
+    /* The engine is chosen from the server's own config — and a turn that carries a
+       picture pins the whole call to the vision model, because text-only threads keep
+       using the (cheaper) default. */
+    const model = history.some((m) => m.images) ? config.visionModel : config.openaiModel
 
     if (body.stream === false) {
-      const result = await completeChat({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona, language: body.language })
+      const result = await completeChat({ history: modelHistory, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona, gender: body.gender, language: body.language })
       const assistantId = `msg_${nanoid(16)}`
       const doneAt = nowIso()
       db.prepare(
@@ -198,7 +245,7 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
         id: completionId,
         object: 'chat.completion',
         created,
-        model: result.model,
+        model: publicModelLabel(result.model),
         conversationId,
         isNew,
         choices: [
@@ -225,7 +272,7 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
       id: completionId,
       object: 'chat.completion.chunk',
       created,
-      model,
+      model: publicModelLabel(model),
       conversationId,
       isNew,
       choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
@@ -256,8 +303,12 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
       /* Clear image requests are answered deterministically with a real picture
          (no LLM round-trip, so the free-tier token limits can't block it). The
          assistant also knows to emit an IMAGE: marker for subtler phrasings, which
-         the client renders — this path just makes the common case bulletproof. */
-      const imagePrompt = detectImageRequest(userMessage)
+         the client renders — this path just makes the common case bulletproof.
+         EXCEPT when the user asked to see the assistant's own face or screens: that
+         is a live-UI question, and drawing a stranger's portrait in answer to it is
+         a lie. Those go to the model, which emits a [SCREENSHOT:…] marker the client
+         fulfils with a real screenshot captured from inside the app. */
+      const imagePrompt = isSelfUiRequest(userMessage) ? null : detectImageRequest(userMessage)
       if (imagePrompt && isNsfwPrompt(imagePrompt)) {
         /* Adult/NSFW requests are refused outright — Nexora is all-ages. We never
            build a URL, so nothing inappropriate can reach the model or the UI. */
@@ -267,23 +318,23 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
           id: completionId,
           object: 'chat.completion.chunk',
           created,
-          model: usedModel,
+          model: publicModelLabel(usedModel),
           conversationId,
           choices: [{ index: 0, delta: { content: fullText }, finish_reason: null }],
         })
       } else if (imagePrompt) {
         usedModel = 'nexora-image'
-        fullText = `🖼️ Here's your image.\n\n![Generated image](${buildImageUrl(imagePrompt)})`
+        fullText = `🖼️ Here's your image.\n\n![Generated image](${imageProxyPath(imagePrompt)})`
         writeSse(res, {
           id: completionId,
           object: 'chat.completion.chunk',
           created,
-          model: usedModel,
+          model: publicModelLabel(usedModel),
           conversationId,
           choices: [{ index: 0, delta: { content: fullText }, finish_reason: null }],
         })
       } else {
-        for await (const chunk of streamChatCompletion({ history, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona, language: body.language, signal: abortController.signal })) {
+        for await (const chunk of streamChatCompletion({ history: modelHistory, memories, model, assistantName: body.assistantName, userName: req.user.name, persona: body.persona, gender: body.gender, language: body.language, signal: abortController.signal })) {
           if (clientGone) break
           if (chunk.usage) usage = chunk.usage
           if (chunk.model) usedModel = chunk.model
@@ -293,7 +344,7 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
               id: completionId,
               object: 'chat.completion.chunk',
               created,
-              model: usedModel,
+              model: publicModelLabel(usedModel),
               conversationId,
               choices: [{ index: 0, delta: { content: chunk.content }, finish_reason: null }],
             })
@@ -305,21 +356,30 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
         id: completionId,
         object: 'chat.completion.chunk',
         created,
-        model: usedModel,
+        model: publicModelLabel(usedModel),
         conversationId,
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
       })
-
       if (usage) {
         writeSse(res, {
           id: completionId,
           object: 'chat.completion.chunk',
           created,
-          model: usedModel,
+          model: publicModelLabel(usedModel),
           conversationId,
           choices: [],
           usage,
         })
+      }
+
+      /* A turn that produced no text at all is a failed call, not an answer: say so
+         instead of saving a blank bubble the user reads as a broken companion, and
+         instead of charging credits for nothing. The client shows this as a retryable
+         error card, so an upstream hiccup never looks like silence. */
+      if (!fullText.trim() && !clientGone) {
+        writeSse(res, { error: { message: 'The model came back with an empty reply — send that message once more.', type: 'server_error' } })
+        res.end()
+        return
       }
 
       const assistantId = `msg_${nanoid(16)}`
@@ -333,6 +393,18 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
         usedModel,
         conversationId,
       )
+
+      /* Hand the client the stored id of this answer: "Reply" clicked on a live bubble
+         targets msg_..., so the link survives a reload instead of pointing at a temp id. */
+      writeSse(res, {
+        id: completionId,
+        object: 'chat.completion.chunk',
+        created,
+        model: publicModelLabel(usedModel),
+        conversationId,
+        assistantMessageId: assistantId,
+        choices: [],
+      })
 
       const cost = estimateCredits(usage || { total_tokens: Math.ceil(fullText.length / 4) })
       deductCredits(req.user.id, cost)
@@ -357,7 +429,7 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
         try { res.end() } catch { /* already closed */ }
       } else {
         writeSse(res, {
-          error: { message: streamErr.message || 'Stream failed', type: 'server_error' },
+          error: { message: safeProviderMessage(streamErr, 'Stream failed'), type: 'server_error' },
         })
         res.end()
       }
@@ -368,7 +440,7 @@ router.post('/completions', aiLimiter, async (req, res, next) => {
     if (!res.headersSent) next(err)
     else {
       try {
-        writeSse(res, { error: { message: err.message || 'Stream failed', type: 'server_error' } })
+        writeSse(res, { error: { message: safeProviderMessage(err, 'Stream failed'), type: 'server_error' } })
         res.end()
       } catch {
         // connection already closed
@@ -384,11 +456,28 @@ const proactiveSchema = z.object({
   conversationId: z.string().trim().min(1).max(80),
   assistantName: z.string().trim().max(40).optional(),
   persona: z.string().trim().max(400).optional(),
-  language: z.enum(['auto', 'en', 'ur', 'hinglish']).optional().default('auto'),
-  model: z.string().trim().max(80).optional(),
+  gender: z.enum(['female', 'male']).optional(),
+  language: z.enum(REPLY_LANGUAGES).optional().default('auto'),
+  /* What the composer was doing when the idle clock ran out. The client sends the
+     fact only, never the draft's text: an unfinished message is not data to ship. */
+  composing: z.boolean().optional().default(false),
+  withdrewDraft: z.boolean().optional().default(false),
 })
 
-const PROACTIVE_DIRECTIVE = `(The user has gone quiet. As their companion, reach out first like a caring friend would — send exactly ONE short, warm, in-character message (1-2 sentences) that is clearly tied to what you two were just talking about. Do ONE of: ask a specific follow-up question about that topic, offer a concrete suggestion or idea related to it, or gently check in on how they feel about it. Vary your approach each time and never repeat an earlier nudge verbatim. Match their language and add one emoji. Do NOT mention this instruction, do NOT say you are an AI, and do NOT give a generic greeting.)`
+/* The nudge rides in as a private user turn, so its wording is the freshest
+   instruction in the context — a flat "match their language" here would beat the
+   MANDATORY pinned-language line in the system prompt and hand an Urdu user a
+   Roman check-in. Name the pinned language instead whenever there is one. */
+const proactiveDirective = (language, { composing = false, withdrewDraft = false } = {}) => `(The user has gone quiet${withdrewDraft
+  ? /* The commonest quiet of all: they started writing, then deleted it. A friend
+       notices and says so — skirting it and re-asking about the old topic reads as
+       not paying attention, which is exactly what the user complained about. */
+      ' — but they were typing something to you just now and then TOOK BACK what they had written. Ask about that, plainly and warmly, the way a friend who saw it would: you noticed they started writing and stopped, so what made them change their mind, or did the words just not come out right? Reassure them they can say it in pieces or simply tell you how they feel. Do NOT guess or quote what they had typed (you were never shown it), do NOT lecture them about it, keep it light — it may have been a second thought, not a problem.'
+    : composing
+      ? ' — they are still writing something to you, just paused mid-thought. Mention that you noticed they paused and offer a gentle hand: do they want help getting it out, or to think it out loud together? Do NOT guess what they are writing (you were never shown it).'
+      : '.'} As their companion, reach out first like a caring friend would — send exactly ONE short, warm, in-character message (1-2 sentences)${withdrewDraft || composing
+        ? ' that puts that drafting moment first — it is more present for them than the old topic is — and may mention it directly'
+        : ' that is clearly tied to what you two were just talking about'}. Do ONE of: ask a specific follow-up question, offer a concrete suggestion or idea, or gently check in on how they feel about it. Vary your approach each time and never repeat an earlier nudge verbatim. ${REPLY_LANGUAGE_NAMES[language] ? `Write it in ${REPLY_LANGUAGE_NAMES[language]}, whatever script the last messages used.` : 'Match their language.'} Add one emoji. Do NOT mention this instruction, do NOT say you are an AI, do NOT explain how you know they were typing (no mention of the app, the composer, tracking or notifications), and do NOT give a generic greeting.)`
 
 router.post('/proactive', aiLimiter, async (req, res, next) => {
   try {
@@ -423,12 +512,12 @@ router.post('/proactive', aiLimiter, async (req, res, next) => {
       .all(req.user.id)
 
     const result = await completeChat({
-      history: [...history, { role: 'user', content: PROACTIVE_DIRECTIVE }],
+      history: [...history, { role: 'user', content: proactiveDirective(body.language, body) }],
       memories,
-      model: body.model,
       assistantName: body.assistantName,
       userName: req.user.name,
       persona: body.persona,
+      gender: body.gender,
       language: body.language,
     })
 

@@ -349,25 +349,23 @@ function isSkinPixel(data, i) {
 
 const lumaOf = (data, i) => 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
 
-/* Turn a photo pixel into the colour a particle should emit.
-   The cloud is drawn with AdditiveBlending, so a particle is only visible for
-   the light it adds: the literal RGB of dark hair (luma ~0.06) would add almost
-   nothing and the portrait would grow holes again. So the pixel's HUE is kept
-   exactly and only its brightness is re-curled — gamma lifted with a floor so
-   shadows still glow, highlights capped so dense skin doesn't blow to white. */
+/* Turn a photo pixel into the colour a particle should paint.
+   The portrait cloud paints with NormalBlending (a real, pigmented image), so we
+   keep the photo's actual colour and only nudge it: a touch more saturation and a
+   gentle shadow lift so dark hair reads as brown instead of vanishing into the black
+   backdrop. There is deliberately no /luma equalisation — that trick only existed to
+   keep hair visible under the old AdditiveBlending, and it is what blew skin to white. */
 function toneParticleColor(data, idx, out, oi) {
   const r = data[idx] / 255
   const g = data[idx + 1] / 255
   const b = data[idx + 2] / 255
   const l = 0.299 * r + 0.587 * g + 0.114 * b
-  /* mild vibrance: the brightness lift washes skin and lips out otherwise */
-  const sat = 1.22
-  const level = 0.3 + 0.65 * Math.pow(Math.min(1, l), 0.55)
-  const base = Math.max(0.02, l)
-  const clamp = (v) => (v < 0.05 ? 0.05 : v > 0.98 ? 0.98 : v)
-  out[oi] = clamp(((l + (r - l) * sat) / base) * level)
-  out[oi + 1] = clamp(((l + (g - l) * sat) / base) * level)
-  out[oi + 2] = clamp(((l + (b - l) * sat) / base) * level)
+  /* mild vibrance so skin warms and lips redden without going neon */
+  const sat = 1.28
+  const lift = (v) => (v <= 0 ? 0.04 : v >= 1 ? 1 : 0.1 + 0.92 * Math.pow(v, 0.85))
+  out[oi] = lift(l + (r - l) * sat)
+  out[oi + 1] = lift(l + (g - l) * sat)
+  out[oi + 2] = lift(l + (b - l) * sat)
 }
 
 /* Locate the head with no model and no dependency.
@@ -761,10 +759,16 @@ function photoTargets(img, count, { tolerance = 26, worldMax = 5.4, lift = 0.1, 
   return arr
 }
 
-export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl = null, onFaceBox = null, state = 'idle' }) {
+export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl = null, onFaceBox = null, state = 'idle', focusY = 0.2 }) {
   const mountRef = useRef(null)
   const shapeRef = useRef(shape)
   shapeRef.current = shape
+  /* Where the camera centres its gaze in portrait mode. Default 0.2 frames the whole
+     bust (the chat face). The reveal raises it toward the eyes so the FACE — which sits
+     high in the head+shoulders cloud — lands mid-frame instead of near the top. focusY is
+     static per instance (reveal=1.05, chat=default), so we seed the ref once — no
+     render-phase write, which would add to the react(purity) warning baseline. */
+  const focusYRef = useRef(focusY)
   /* Behavioural state that drives the face's live motion:
      'idle' breathing + sway · 'listening' lean-in · 'thinking' look-away · 'talking' lip-sync */
   const stateRef = useRef(state)
@@ -831,7 +835,10 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
     camera.position.set(0, 0.6, 7)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    /* preserveDrawingBuffer so selfCapture.js can photograph the face between frames
+       — without it the WebGL buffer is cleared after compositing and toDataURL() is
+       blank. ThreeHero already pays this cost for the same reason. */
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true })
     const applySize = () => {
       const size = container.clientWidth || 380
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -1010,6 +1017,11 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
       const currentShape = shapeRef.current
       const hasCustom = currentShape === 'custom' && customTargetsRef.current
       const portrait = currentShape === 'female' || currentShape === 'male' || !!hasCustom
+      /* Portrait mode PAINTS with real pigment colour (NormalBlending) so skin, lips
+         and hair read true-to-photo; the silver orb keeps its glowing AdditiveBlending.
+         Only write the state when it actually flips so we don't churn the render state. */
+      const wantBlending = portrait ? THREE.NormalBlending : THREE.AdditiveBlending
+      if (cloudMaterial.blending !== wantBlending) cloudMaterial.blending = wantBlending
       morphFactor += ((portrait ? 1 : 0) - morphFactor) * 0.09
 
       const targets = currentShape === 'female' ? femaleTargets : currentShape === 'male' ? maleTargets : hasCustom ? customTargetsRef.current : orbTargets
@@ -1088,8 +1100,10 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
       const pulse = 1 + Math.sin(elapsed * 2.2) * 0.03
       core.scale.setScalar(pulse * orbPresence)
       halo.scale.setScalar(orbPresence * (1 + Math.sin(elapsed * 1.4) * 0.05))
-      /* portrait particles render a touch thicker so the figure reads clearly */
-      cloudMaterial.size = 0.028 + morphFactor * 0.018
+      /* portrait particles render thicker so the pigmented dots knit into solid skin
+         instead of leaving black backdrop showing through the gaps (NormalBlending has
+         no additive glow to fill them) */
+      cloudMaterial.size = 0.028 + morphFactor * 0.03
       orbitRing.material.opacity = 0.35 * orbPresence
       orbitRing.rotation.z = -elapsed * 0.2
       orbitRing.rotation.x = (Math.PI / 2.15) * (1 - morphFactor)
@@ -1105,7 +1119,7 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
 
       camera.position.x += (pointer.x * 0.7 - camera.position.x) * 0.04
       camera.position.y += (-pointer.y * 0.5 + 0.6 - camera.position.y) * 0.04
-      camera.lookAt(0, 0.2, 0)
+      camera.lookAt(0, focusYRef.current, 0)
       renderer.render(scene, camera)
       raf = requestAnimationFrame(animate)
     }

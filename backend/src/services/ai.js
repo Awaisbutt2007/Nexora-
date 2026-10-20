@@ -1,5 +1,5 @@
 import OpenAI from 'openai'
-import { config, systemPromptFor } from '../config.js'
+import { config, systemPromptFor, REPLY_LANGUAGE_SCRIPTS } from '../config.js'
 
 function createClient() {
   if (!config.openaiApiKey) return null
@@ -9,7 +9,7 @@ function createClient() {
   })
 }
 
-function buildMessages(history, userMemories = [], ctx = {}) {
+function buildMessages(history, userMemories = [], ctx = {}, extraDirective = null) {
   const memoryBlock = userMemories.length
     ? `\n\nKnown user context:\n${userMemories.map((m) => `- ${m.key}: ${m.value}`).join('\n')}`
     : ''
@@ -19,7 +19,7 @@ function buildMessages(history, userMemories = [], ctx = {}) {
     /* A turn with attached images becomes OpenAI-style multimodal content — a
        text part plus one image_url part per picture (base64 data URLs, because
        the provider cannot reach our localhost /uploads). */
-    ...history.map((m) => (m.images?.length
+    ...history.map((m) => (m.images?.length && m.role === 'user'
       ? {
           role: m.role,
           content: [
@@ -27,7 +27,19 @@ function buildMessages(history, userMemories = [], ctx = {}) {
             ...m.images.map((url) => ({ type: 'image_url', image_url: { url } })),
           ],
         }
+      /* An assistant turn is plain text, always. Multimodal array content is only
+         legal on a user part, so once her own screenshots started living on
+         assistant messages, feeding them back made the provider reject the WHOLE
+         request ("for 'role:assistant' ... content must be a string") and bricked
+         every later turn in that conversation. She does not need to re-see a picture
+         she already described. */
       : { role: m.role, content: m.content })),
+    /* A pinned reply language is a hard rule the prompt states twice, yet a small
+       model still answers the FIRST turn of a thread in the script it was just
+       shown. When that happens the guard below re-asks once, and this is the line
+       that tells it what it got wrong — appended last so it is the freshest thing
+       in the context. Never saved to the transcript. */
+    ...(extraDirective ? [{ role: 'system', content: extraDirective }] : []),
   ]
 }
 
@@ -50,8 +62,92 @@ async function* mockStream(messages) {
   }
 }
 
-export async function* streamChatCompletion({ history, memories, model, assistantName, userName, persona, language, signal }) {
-  const messages = buildMessages(history, memories, { assistantName, userName, persona, language })
+/* -------------------------------------------------------------------------
+   Language-script enforcement — the prompt can ask, only the code can guarantee.
+
+   Settings stores one of four reply languages and the system prompt calls the
+   pinned one MANDATORY twice over, but a small model reading a Roman-typed "hi"
+   in an empty thread still drifts into Roman-typed Urdu (Hinglish) — the very
+   first reply of a conversation is where it happens, because nothing in the
+   context is written in the target script yet to anchor it. A user who picked
+   "Urdu first" reads that as the setting being ignored.
+
+   So the opening of every reply is judged before a single character reaches the
+   client: SAMPLE_CHARS is held back (it streams in well under a second), the
+   script is checked, and on a mismatch the call is closed and re-issued once
+   with a corrective directive. Whatever the second attempt produces is streamed
+   as-is — a wrong script then costs one retry, never a blocked or empty reply.
+   ------------------------------------------------------------------------- */
+const SAMPLE_CHARS = 160
+const MAX_SCRIPT_ATTEMPTS = 2
+const URDU_SCRIPT_RE = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/
+const SCRIPT_FIXUP = {
+  urdu: '(Your previous attempt was written in Roman letters, which the user cannot read. Answer the SAME message again, this time with every word in the Urdu script — e.g. "وہ بالکل ٹھیک ہے، آپ بتائیں آگے کیا ہوا؟". Do not write a single Roman-lettered sentence.)',
+  latin: '(Your previous attempt used the Urdu/Arabic script, but the user pinned a Latin-script language. Answer the SAME message again using Roman/Latin letters only.)',
+}
+
+/* null = the sample honours the pinned language (also returned when there is
+   nothing to judge yet, so a short reply is never retried on a hunch). */
+export function scriptViolation(text, language) {
+  const wanted = REPLY_LANGUAGE_SCRIPTS[language]
+  const body = String(text || '')
+  if (!wanted || body.trim().length < 2) return null
+  const hasUrdu = URDU_SCRIPT_RE.test(body)
+  if (wanted === 'urdu') return hasUrdu ? null : 'urdu'
+  /* An Urdu character inside an English or Hinglish reply is the model slipping
+     back to the script of the thread, not a bracketed term — both are wrong. */
+  return hasUrdu ? 'latin' : null
+}
+
+const asIterable = (it) => ({ [Symbol.asyncIterator]: () => it })
+
+/* Wraps a stream factory so the client only ever sees text in the right script.
+   `open` is injectable so the retry path is testable without a provider. */
+export async function* guardedStream(params, open = providerStream) {
+  const { language, signal, guard = true } = params
+  if (!guard || !REPLY_LANGUAGE_SCRIPTS[language]) {
+    yield* open(params)
+    return
+  }
+  for (let attempt = 1; ; attempt += 1) {
+    const held = []
+    let sample = ''
+    let verdict = false /* false = still sampling, null = fine, string = wrong script */
+    let finished = false
+    const source = open({ ...params, extraDirective: attempt > 1 ? SCRIPT_FIXUP[REPLY_LANGUAGE_SCRIPTS[language]] : null })[Symbol.asyncIterator]()
+    while (true) {
+      const step = await source.next()
+      if (step.done) { finished = true; break }
+      if (signal?.aborted) { await source.return?.(undefined); return }
+      held.push(step.value)
+      if (step.value.content) sample += step.value.content
+      if (sample.length >= SAMPLE_CHARS || step.value.usage) verdict = scriptViolation(sample, language)
+    }
+    if (verdict === false) verdict = scriptViolation(sample, language)
+    if (!verdict) {
+      for (const chunk of held) yield chunk
+      if (!finished) {
+        try {
+          for await (const chunk of asIterable(source)) {
+            if (signal?.aborted) break
+            yield chunk
+          }
+        } finally {
+          await source.return?.(undefined)
+        }
+      }
+      return
+    }
+    await source.return?.(undefined) /* stop paying for the doomed call */
+    if (attempt >= MAX_SCRIPT_ATTEMPTS) {
+      for (const chunk of held) yield chunk
+      return
+    }
+  }
+}
+
+async function* providerStream({ history, memories, model, assistantName, userName, persona, language, gender, signal, extraDirective }) {
+  const messages = buildMessages(history, memories, { assistantName, userName, persona, language, gender }, extraDirective)
   const client = createClient()
   const usedModel = model || config.openaiModel
 
@@ -87,8 +183,15 @@ export async function* streamChatCompletion({ history, memories, model, assistan
   }
 }
 
-export async function completeChat({ history, memories, model, assistantName, userName, persona, language }) {
-  const messages = buildMessages(history, memories, { assistantName, userName, persona, language })
+/* The route-facing entry point: same async generator as before, wrapped in the
+   script guard. Mock mode is exempt — the canned reply is always English, so
+   re-asking it for a script it cannot change would only slow the demo down. */
+export function streamChatCompletion(params) {
+  return guardedStream({ ...params, guard: Boolean(config.openaiApiKey) })
+}
+
+async function providerComplete({ history, memories, model, assistantName, userName, persona, language, gender, extraDirective }) {
+  const messages = buildMessages(history, memories, { assistantName, userName, persona, language, gender }, extraDirective)
   const client = createClient()
   const usedModel = model || config.openaiModel
 
@@ -114,6 +217,15 @@ export async function completeChat({ history, memories, model, assistantName, us
     model: usedModel,
     usage: completion.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   }
+}
+
+/* Non-streaming twin of guardedStream — used by the idle check-in, where the
+   nudge lands in the thread as a saved message and nobody gets to see a retry. */
+export async function completeChat(params) {
+  const first = await providerComplete(params)
+  const verdict = config.openaiApiKey ? scriptViolation(first.content, params.language) : null
+  if (!verdict) return first
+  return providerComplete({ ...params, extraDirective: SCRIPT_FIXUP[verdict] })
 }
 
 export function estimateCredits(usage) {

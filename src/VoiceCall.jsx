@@ -12,13 +12,15 @@ import './VoiceCall.css'
 
 const REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/calls'
 
-const STATUS_TEXT = {
-  'requesting-mic': ['Waking the microphone…', 'Allow mic access in the browser prompt to talk with Aira.'],
-  connecting: ['Connecting…', 'Aira is picking up.'],
+/* The call copy speaks the assistant's real name, never a hard-coded "Aira", so a
+   renamed companion stays consistent with the Talk button that opened the call. */
+const buildStatusText = (name) => ({
+  'requesting-mic': ['Waking the microphone…', `Allow mic access in the browser prompt to talk with ${name}.`],
+  connecting: ['Connecting…', `${name} is picking up.`],
   live: ['', ''],
   ended: ['Call ended', 'Your conversation was saved to history.'],
   error: ['Connection problem', ''],
-}
+})
 
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 
@@ -216,6 +218,7 @@ export default function VoiceCall({ authToken, user, prefs = {}, onClose }) {
         language: prefs.language,
         assistantName: prefs.assistantName,
         persona: prefs.persona || undefined,
+        gender: prefs.gender,
         conversationId: convRef.current,
       })
       convRef.current = session.conversationId || convRef.current
@@ -323,12 +326,15 @@ export default function VoiceCall({ authToken, user, prefs = {}, onClose }) {
     setMicState(next ? 'muted' : 'listening')
   }
 
+  const aiName = prefs.assistantName || 'Aira'
+  const STATUS_TEXT = buildStatusText(aiName)
+
   const headline = phase === 'live'
-    ? { listening: 'Listening…', thinking: 'Thinking…', speaking: 'Aira is speaking', interrupted: 'You interrupted — got it', muted: 'Muted — Aira can’t hear you' }[micState] || 'Ready'
+    ? { listening: 'Listening…', thinking: 'Thinking…', speaking: `${aiName} is speaking`, interrupted: 'You interrupted — got it', muted: `Muted — ${aiName} can’t hear you` }[micState] || 'Ready'
     : STATUS_TEXT[phase]?.[0] || ''
 
   return (
-    <div className="voice-call-overlay" role="dialog" aria-modal="true" aria-label="Voice call with Aira">
+    <div className="voice-call-overlay" role="dialog" aria-modal="true" aria-label={`Voice call with ${aiName}`}>
       <div className="voice-call-card">
         <button type="button" className="voice-call-close" aria-label="Close voice call" onClick={() => { endCall('user'); onClose() }}>×</button>
         <span className={`voice-orb ${phase === 'live' ? micState : phase}`} aria-hidden="true">✦</span>
@@ -341,11 +347,11 @@ export default function VoiceCall({ authToken, user, prefs = {}, onClose }) {
           {turns.slice(-2).map((t) => (
             <div key={t.id} className="voice-turn">
               <p><b>You</b> {t.user}</p>
-              {t.aira && <p><b>Aira</b> {t.aira}</p>}
+              {t.aira && <p><b>{aiName}</b> {t.aira}</p>}
             </div>
           ))}
           {userLive && <p><b>You</b> {userLive}</p>}
-          {airaLive && <p><b>Aira</b> {airaLive}<span className="chat-cursor">▍</span></p>}
+          {airaLive && <p><b>{aiName}</b> {airaLive}<span className="chat-cursor" aria-hidden="true" /></p>}
         </div>
 
         {phase === 'live' && <p className="voice-timer">{fmt(secondsLeft)} left · this call is live, not a demo</p>}

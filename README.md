@@ -17,6 +17,17 @@ Without `OPENAI_API_KEY` in `backend/.env` the API streams mock replies, so ever
 demonstrable offline. Individual commands: `npm run dev` (web only), `npm run dev:api`
 (API only), `npm run build`, `npm run lint`, `npm --prefix backend test`.
 
+### One-process mode
+
+After `npm run build`, the API serves the built app itself — **`http://localhost:8787`** is
+the whole product (page + `/api` + `/uploads` on one origin, no Vite needed). Useful for a
+test build or showing the app to someone; edit `src/` and you are back in dev mode. Set
+`HOSTED_CLIENT=0` in `backend/.env` for an API-only process.
+
+> Whatever address you open, the page always talks to itself: a request that fails means
+> the server behind that address is not running, never a CORS rule. `Failed to fetch` in
+> the browser used to look like a wrong password — that class is now structurally impossible.
+
 ## React + Vite template notes
 
 Currently, two official plugins are available:

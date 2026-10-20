@@ -32,7 +32,7 @@ wire anything new through them.
 
 | File | Owns |
 | --- | --- |
-| `src/index.js` | Express app, CORS, `/health`, route mounting |
+| `src/index.js` | Express app, CORS, `/health`, route mounting, and serving `../dist` when a build exists |
 | `src/config.js` | Env → `config`, `PLANS`, `SYSTEM_PROMPT` |
 | `src/db/index.js` | `DatabaseSync` from `node:sqlite` (`getDb()`, `nowIso()`), schema in `src/db/reset.js` |
 | `src/middleware/auth.js` | `signToken`, `requireAuth`, `optionalAuth`, `sanitizeUser` |
@@ -47,7 +47,7 @@ wire anything new through them.
 | Both servers at once | `npm run dev:all` (`scripts/dev-all.mjs`: API + Vite, `[api]`/`[web]` log prefixes, Ctrl+C closes both) |
 | Frontend dev | `npm run dev` (Vite; `http://localhost:5173`, silently rolls to the next free port) |
 | Backend dev | `npm run dev:api` (`node --watch`), or `npm run start:api` |
-| Production build | `npm run build` |
+| Production build | `npm run build` (writes `dist/`, which the API then serves at `http://localhost:8787`) |
 | Lint | `npm run lint` (oxlint) |
 | Backend tests | `npm --prefix backend test` (needs no running server) |
 | Recreate the DB | `npm --prefix backend run db:reset` |
@@ -64,25 +64,31 @@ noise. Anything above that baseline is yours to fix.
 | `nexora_onboarding_pending` | `Nexora()` | `'1'` (Google) or `'signup'` — keeps the wizard in front |
 | `nexora_onboarding_progress` | `Onboarding.jsx` | Half-finished wizard stage |
 
-## Three gotchas that cost hours
+## Four gotchas that cost hours
 
-1. **The page talks to the API through Vite, not cross-origin.** `API_BASE` in
-   `src/api/nexora.js` is `import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' :
-   'http://localhost:8787')` — in dev that is an empty string, so every call is a relative
-   `/api/...` (and `/uploads/...`) request that `vite.config.js` proxies to `:8787`. Set
-   `VITE_API_URL` only to bypass the proxy (a deployed backend); the production build keeps
-   the absolute default. A down backend then reaches the browser as an empty **502** from the
-   proxy (not a network error), and `parseJson()`/`apiErrorText()` render that as the same
-   "start the API with npm run dev:all" message — `dev:all` exists so the pair is never
-   started apart.
-2. **When you do hit a real cross-origin call, an unlisted origin looks like broken auth.**
-   `fetch` then rejects with an opaque `TypeError: Failed to fetch`, no status. `CORS_ORIGIN`
-   is an exact comma list (`http://localhost:5173` by default); in development the backend
-   also reflects any loopback or RFC 1918 origin on any port (`config.corsAllowLocalOrigins`),
-   which covers Vite's port rollover to `:5174`, the printed `http://192.168.x.x:5173` Network
-   URL and a phone on the same Wi-Fi. `apiErrorText()` turns the residual cases into a toast
-   that names the failing address.
-3. **The backend answers `GET /health`, not `/api/health`.**
+1. **The page always talks to itself — CORS is out of the picture.** `API_BASE` in
+   `src/api/nexora.js` is `import.meta.env.VITE_API_URL ?? ''`, so calls are relative
+   `/api/...` and `/uploads/...`, resolved against whatever served the page: `vite.config.js`
+   proxies them in dev **and** `preview`, and in production the backend hosts `dist/` itself
+   (`http://localhost:8787`). Set `VITE_API_URL` only when the frontend is deployed apart
+   from its API. Consequence when the API is simply not running: through the proxy the
+   browser gets an empty **502**, and hosted-directly it gets a network error —
+   `parseJson()`/`apiErrorText()` turn both into "run npm run dev:all, then reload".
+2. **Left-over servers from an earlier terminal are the real "nothing works" bug.** A
+   previous session's `node --watch src/index.js` keeps its port after the terminal closes
+   (and IDE-managed terminals get reaped between sessions, so the API can be gone while the
+   page still looks loaded). Check before debugging code:
+   `Get-NetTCPConnection -State Listen -LocalPort 8787,5173,5174` and
+   `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select-Object ProcessId,CommandLine`.
+   A duplicate backend now exits with a printed explanation instead of a stack trace.
+3. **If a request really is cross-origin, an unlisted origin looks like broken auth.**
+   `fetch` rejects with an opaque `TypeError: Failed to fetch`, no status. `CORS_ORIGIN` is
+   an exact comma list (`http://localhost:5173` by default); in development the backend also
+   reflects any loopback or RFC 1918 origin on any port (`config.corsAllowLocalOrigins`),
+   covering Vite's rollover to `:5174`, the printed `http://192.168.x.x:5173` Network URL and
+   a phone on the same Wi-Fi.
+4. **The backend answers `GET /health`, not `/api/health`.** (It answers `GET /` with the API
+   docs only while no build is hosted.)
 
 ## Related skills
 

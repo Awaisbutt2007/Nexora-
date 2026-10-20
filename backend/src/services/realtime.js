@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { config } from '../config.js'
+import { config, creatorRules, clockLine } from '../config.js'
 
 /* Realtime speech-to-speech provider layer.
 
@@ -25,7 +25,7 @@ export function isSupportedVoice(voice) {
   return PROVIDER_VOICES.includes(voice)
 }
 
-export function buildVoiceInstructions({ assistantName = 'Aira', userName = '', memories = [], persona = '', language = '' } = {}) {
+export function buildVoiceInstructions({ assistantName = 'Aira', userName = '', memories = [], persona = '', language = '', gender = '' } = {}) {
   const memoryBlock = memories.length
     ? `\nKnown user context (approved memories — use only when relevant, never recite the list):\n${memories.map((m) => `- ${m.key}: ${m.value}`).join('\n')}`
     : ''
@@ -43,10 +43,16 @@ export function buildVoiceInstructions({ assistantName = 'Aira', userName = '', 
     : lang === 'hinglish' ? 'The user set their language to Hinglish: ALWAYS speak in Hinglish — Hindi/Urdu conversation mixed with English words (e.g. "main badhiya hoon, tum sunao") — NOT plain English, no matter what language they reply in.'
     : 'Reply in whichever language the user last used unless they ask otherwise.'
 
+  /* The companion's own gender drives both its spoken voice and its grammar: a
+     female Aira must say "رکھوں گی"/"rakhoongi", a male one "رکھوں گا"/"rakhoonga".
+     Defaults to female to match the shipped persona when no gender is sent. */
+  const fem = gender !== 'male'
+  const genderGrammar = `\n- You are ${fem ? 'female' : 'male'}: in Urdu, Roman Urdu and Hinglish always use ${fem ? 'feminine' : 'masculine'} first-person verb forms about yourself (Urdu "${fem ? 'رکھوں گی / کہوں گی / ہوں گی' : 'رکھوں گا / کہوں گا / ہوں گا'}", Roman "${fem ? 'rakhoongi / kahungi / hoongi' : 'rakhoonga / kahunga / hoonga'}") — never the opposite.`
+
   return `You are ${assistantName}, a personal voice assistant inside the Nexora workspace. You are having a live spoken conversation.${who}
 
 Voice and style:
-- Speak with a natural, friendly, expressive feminine voice. Warm, confident, helpful.
+- Speak with a natural, friendly, expressive ${fem ? 'feminine' : 'masculine'} voice. Warm, confident, helpful.
 - Speak at a brisk, fluent pace — like a person mid-conversation, never rushed or slurred.
 - Keep the pause between your sentences short: chain your thoughts tightly instead of trailing into silence after each sentence, and don't leave a long gap before you start replying.
 - Never robotic, monotonous, overly dramatic or excessively formal. No filler words ("umm", "so basically") and do not artificially slow down.
@@ -55,7 +61,7 @@ Voice and style:
 
 Languages:
 - Understand English, Urdu, Roman Urdu and Hinglish, including mixed sentences like "Aira, mujhe mera project explain karo in English".
-- ${languageRule}
+- ${languageRule}${genderGrammar}
 - When reading Roman Urdu/Hinglish aloud, pronounce it as natural spoken Urdu/Hindi.
 
 Conversation intelligence:
@@ -67,10 +73,10 @@ ${memoryBlock}${personaBlock}
 
 Honesty:
 - You are an AI. Never pretend to be a human and never claim personal experiences you have not had.
-- If you cannot do something (browse, send messages, see), say so briefly and offer what you can do instead.`
+- If you cannot do something (browse, send messages, see), say so briefly and offer what you can do instead.${clockLine({ spoken: true })}${creatorRules({ spoken: true })}`
 }
 
-export function buildRealtimeSession({ assistantName, userName, voice, language, memories, persona }) {
+export function buildRealtimeSession({ assistantName, userName, voice, language, memories, persona, gender }) {
   const transcription = { model: config.voiceTranscribeModel }
   const langCode = LANGUAGE_CODES[language] ?? LANGUAGE_CODES.auto
   if (langCode) transcription.language = langCode
@@ -79,7 +85,7 @@ export function buildRealtimeSession({ assistantName, userName, voice, language,
   return {
     type: 'realtime',
     model: config.voiceRealtimeModel,
-    instructions: buildVoiceInstructions({ assistantName, userName, memories, persona, language }),
+    instructions: buildVoiceInstructions({ assistantName, userName, memories, persona, language, gender }),
     audio: {
       input: {
         transcription,

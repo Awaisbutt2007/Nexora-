@@ -13,7 +13,7 @@ Legend: ✅ done & verified · 🟡 partial · 🟥 not started · ⚪ code exis
 | 2 | Security & privacy | ✅ | Full audit + fixes in `SECURITY_AUDIT_REPORT.md`; tooling + CI in place. |
 | 3 | Auth & account security | 🟡 | Email/pw + Google + rate limits done. Missing: password reset, email verification, server-side logout revocation. |
 | 4 | Chat & conversation UX | 🟡 | Streaming, markdown, code-blocks, **Stop (new)** done. Missing: regenerate, copy-whole-response, syntax highlighting, in-chat attachments. |
-| 5 | Aira personality & intelligence | ✅ | Name/persona/language configurable; emotional + proactive verified; honest capability limits (see §6/§7 of audit). |
+| 5 | Aira personality & intelligence | ✅ | Name/persona/language configurable; emotional + proactive verified; honest capability limits (see §6/§7 of audit). The prompt now carries today's date and forbids invented live facts — a live probe caught her answering "22 May 2024" when asked the date. |
 | 6 | Memory system | 🟡 | CRUD + isolation + retrieval done. Missing: retention policy, duplicate merge, provenance UI. |
 | 7 | Voice assistant | 🟡/⚪ | Real realtime pipeline, mic lifecycle, interruption, mute, transcript storage. Real provider ⚪ unverified (needs key). |
 | 8 | Desktop agent | ✅ | Least-privilege, loopback-only, SSRF guard, confirmations, audit. Playwright automation 🟡 (⚪ not exercised). |
@@ -22,7 +22,7 @@ Legend: ✅ done & verified · 🟡 partial · 🟥 not started · ⚪ code exis
 | 11 | Web search & research | 🟥 | No integration. |
 | 12 | Database & reliability | 🟡 | SQLite, parameterized, isolated. Missing: migrations, Postgres plan, backups, full account-deletion cascade. |
 | 13 | UI/UX & design system | 🟡 | Premium dark theme + responsive. Missing: a11y depth, design tokens, skeletons, light theme. |
-| 14 | Usage, cost & reliability | 🟡 | Server-side credits + **AI rate limit (new)**. Missing: metrics/monitoring, provider timeouts on AI calls. `/health` leaks config (Low). `upgrade` has no payment gate. |
+| 14 | Usage, cost & reliability | 🟡 | Server-side credits + **AI rate limit (new)**. Missing: metrics/monitoring, provider timeouts on AI calls. `/health` reports readiness only (engine/voice ids are behind `HEALTH_VERBOSE=1`). `upgrade` has no payment gate. |
 | 15 | Automated testing & QA | ✅ | 30 backend (functional+security+cancel+ratelimit), 22 agent, build, lint, audit, secret scan. Failure paths tested. |
 | 16 | Deployment & release readiness | 🟡 | Prod fail-fast guards + CI gate done. No deploy manifest/runbook yet → `docs/DEPLOYMENT.md`. |
 | 17 | Phased strategy | ✅ | Followed A→(B/C/D/E/H in-slice). Large features deferred with plan, not faked. |

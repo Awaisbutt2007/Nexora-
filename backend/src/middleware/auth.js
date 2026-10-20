@@ -46,6 +46,18 @@ export function optionalAuth(req, _res, next) {
   next()
 }
 
+/* Companion preferences ride in one JSON column. Parsing is defensive because a
+   hand-edited or half-written row must never take a login down with it. */
+function parsePrefs(raw) {
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export function sanitizeUser(row) {
   return {
     id: row.id,
@@ -56,6 +68,7 @@ export function sanitizeUser(row) {
     plan: row.plan,
     creditsRemaining: row.credits_remaining,
     isPremium: Boolean(row.is_premium),
+    prefs: parsePrefs(row.prefs_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }

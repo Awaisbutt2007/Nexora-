@@ -86,11 +86,29 @@ function migrate(database) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    /* User-scheduled tasks ("Schedule" section). reminded_at is the nudge dedup:
+       the day-before note fires once (until stamped), the day-of note fires once
+       AFTER the due moment passes — one column carries both because a reminder
+       stamped before due_at never satisfies the due bucket. */
+    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      notes TEXT,
+      due_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+      reminded_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
     CREATE INDEX IF NOT EXISTS idx_tool_runs_user ON tool_runs(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_voice_prints_user ON voice_prints(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user ON scheduled_tasks(user_id, due_at ASC);
   `)
 
   // Lightweight column migrations for existing databases
@@ -101,12 +119,25 @@ function migrate(database) {
   if (!userColumns.includes('google_sub')) {
     database.exec('ALTER TABLE users ADD COLUMN google_sub TEXT')
   }
+  if (!userColumns.includes('prefs_json')) {
+    /* Companion choices (reply language, talk voice, AI name, persona, face), kept
+       as one JSON blob. They used to live only in localStorage, which is per-origin
+       and is cleared on logout — so someone who picked "Urdu first" silently came
+       back to 'auto' on the next device and read Roman replies as a broken setting. */
+    database.exec('ALTER TABLE users ADD COLUMN prefs_json TEXT')
+  }
 
   /* User-attached reference images live as /uploads paths in a JSON array so a
      text-only message and an image message can share the same table. */
   const messageColumns = database.prepare('PRAGMA table_info(messages)').all().map((col) => col.name)
   if (!messageColumns.includes('images_json')) {
     database.exec('ALTER TABLE messages ADD COLUMN images_json TEXT')
+  }
+  if (!messageColumns.includes('reply_to')) {
+    /* "Reply" in the chat UI points a user turn at one specific earlier turn. The
+       id is kept so a reloaded thread still shows the quote; the quoted text itself
+       is never duplicated here — it is read back from the target message. */
+    database.exec('ALTER TABLE messages ADD COLUMN reply_to TEXT')
   }
 
   // Voice enrollment: CREATE TABLE IF NOT EXISTS above covers fresh and existing

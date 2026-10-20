@@ -1,17 +1,34 @@
-/* Starts the frontend and the backend together with one command, so the app can never
-   be open while its API is forgotten — the #1 cause of a mysterious "Failed to fetch".
+/* Starts the frontend and the backend together with one command, so the app can never be
+   open while its API is forgotten — the #1 cause of a mysterious "Failed to fetch".
    Usage: npm run dev:all     (Ctrl+C closes both) */
 import { spawn } from 'node:child_process'
+import net from 'node:net'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const backendDir = fileURLToPath(new URL('../backend', import.meta.url))
 const rootDir = fileURLToPath(new URL('..', import.meta.url))
+const apiPort = Number(process.env.PORT || 8787)
 
-const targets = [
-  ['api', process.execPath, ['--watch', 'src/index.js'], backendDir],
-  ['web', process.execPath, ['./node_modules/vite/bin/vite.js'], rootDir],
-]
+/* Something already listening on the API port is a leftover backend from an earlier
+   terminal. Spawning a second copy would die on EADDRINUSE and leave the user staring at
+   code they think is running, so say who owns the port and reuse it instead. */
+const portBusy = (port) => new Promise((resolve) => {
+  const probe = net.connect({ host: '127.0.0.1', port, timeout: 900 })
+  probe.on('connect', () => { probe.destroy(); resolve(true) })
+  probe.on('timeout', () => { probe.destroy(); resolve(false) })
+  probe.on('error', () => resolve(false))
+})
+
+const api = ['api', process.execPath, ['--watch', 'src/index.js'], backendDir]
+const web = ['web', process.execPath, ['./node_modules/vite/bin/vite.js'], rootDir]
+const targets = (await portBusy(apiPort))
+  ? [web]
+  : [api, web]
+if (targets.length === 1) {
+  console.log(`[api] port ${apiPort} is already answering — reusing that backend.`)
+  console.log('[api] if you changed backend code, close the terminal running it and re-run this.')
+}
 
 const children = targets.map(([name, cmd, args, cwd]) => {
   const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: false })

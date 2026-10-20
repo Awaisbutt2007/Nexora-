@@ -117,7 +117,7 @@ or per-user document access.
 - Server-side credit enforcement: ✅ `services/credits.js` (`ensureCredits` before work, `deductCredits` after).
 - Per-user request-rate limit on expensive AI endpoints: ✅ **(added this session)** `aiLimiter` on `/chat/completions`, `/proactive`, `/tools/:id/run`.
 - Provider call timeouts: 🟡 agent bridge bounded; OpenAI client uses SDK defaults.
-- Health endpoint: ✅ present, but 🟡 **information disclosure** — `/health` reports AI mode/model/voice config (Low severity; see security report).
+- Health endpoint: ✅ present and ✅ **no longer a disclosure** — `/health` reports readiness only; engine/voice model ids require `HEALTH_VERBOSE=1` (see security report F5).
 - 🟥 No metrics/monitoring/alerting.
 - 🟡 `/api/user/upgrade` grants premium with **no payment gate** (feature stub).
 

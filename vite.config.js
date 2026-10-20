@@ -6,9 +6,14 @@ import { defineConfig } from 'vite'
    request is same-origin and CORS cannot fail. That kills a whole class of
    "Failed to fetch" traps: Vite rolling to :5174/:5175 when a port is busy, opening
    the app through the printed Network URL (http://192.168.x.x:5173) or from a phone,
-   and localhost vs 127.0.0.1 mismatches. Point VITE_API_URL somewhere else to bypass
-   the proxy (e.g. a deployed backend); production builds keep the absolute default. */
-const API_TARGET = process.env.VITE_API_URL || 'http://localhost:8787'
+   and localhost vs 127.0.0.1 mismatches. A production build stays same-origin as well,
+   because the backend serves dist/ itself. Point VITE_API_URL somewhere else only to
+   bypass the proxy (e.g. a deployed backend). The default is the IPv4 LITERAL, not
+   `localhost`: the backend binds `0.0.0.0` (IPv4 only — it never answers on `::1`), while
+   Node resolves `localhost` to `::1` FIRST. When that first hop is refused or dropped the
+   proxy surfaces it to the browser as a bare `Chat failed (502)` with no JSON body — the
+   exact intermittent Windows failure a direct 127.0.0.1 test can never reproduce. */
+const API_TARGET = process.env.VITE_API_URL || 'http://127.0.0.1:8787'
 const apiProxy = Object.fromEntries(
   ['/api', '/uploads'].map((prefix) => [prefix, { target: API_TARGET, changeOrigin: true }]),
 )

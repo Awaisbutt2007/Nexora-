@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
-import { config } from '../config.js'
+import { config, REPLY_LANGUAGES } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth } from '../middleware/auth.js'
 import { ensureCredits, deductCredits } from '../services/credits.js'
@@ -15,11 +15,12 @@ router.use(requireAuth)
 
 const tokenSchema = z.object({
   voice: z.string().trim().max(20).optional(),
-  language: z.enum(['auto', 'en', 'ur', 'hinglish']).optional().default('auto'),
+  language: z.enum(REPLY_LANGUAGES).optional().default('auto'),
   assistantName: z.string().trim().min(1).max(40).optional(),
   /* Short descriptor chosen at onboarding (e.g. "Assistant — sharp chief-of-staff energy").
      Not a secret; caps at 200 chars so a bad actor can't stuff the system prompt. */
   persona: z.string().trim().max(200).optional(),
+  gender: z.enum(['female', 'male']).optional(),
   conversationId: z.string().trim().max(60).optional().nullable(),
 })
 
@@ -50,6 +51,7 @@ router.post('/token', async (req, res, next) => {
       language: body.language,
       memories,
       persona: body.persona,
+      gender: body.gender,
     })
 
     const secret = await createVoiceClientSecret(session, req.user.id)
@@ -78,8 +80,9 @@ router.post('/token', async (req, res, next) => {
       clientSecret: secret.clientSecret,
       sessionId: secret.sessionId,
       expiresAt: secret.expiresAt,
-      provider: config.voiceProvider,
-      model: config.voiceRealtimeModel,
+      /* No `provider`, no `model`: the browser connects with the ephemeral secret and
+         does not need to know whose engine it is talking to — and once the answer is in
+         the network tab, no prompt rule can keep it private again. */
       voice,
       language: body.language,
       maxSeconds: config.voiceMaxSessionSeconds,

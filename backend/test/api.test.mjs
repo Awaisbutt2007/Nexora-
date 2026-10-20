@@ -25,6 +25,13 @@ process.env.FREE_MONTHLY_CREDITS = '5000'
 /* Pin strict auth so the contract below is the real one; the open demo mode
    (default ON in dev) is exercised separately via a runtime config toggle. */
 process.env.AUTH_OPEN_MODE = '0'
+/* One-process mode: point the hosted-client folder at a throwaway "build" so `GET /` can
+   be asserted to serve the APP (not the API docs) from the same origin as /api. */
+const TEST_CLIENT = path.join(os.tmpdir(), `nexora-client-${process.pid}`)
+fs.mkdirSync(path.join(TEST_CLIENT, 'assets'), { recursive: true })
+fs.writeFileSync(path.join(TEST_CLIENT, 'index.html'), '<!doctype html><title>Nexora test shell</title>')
+fs.writeFileSync(path.join(TEST_CLIENT, 'assets', 'shell.js'), 'console.log(1)')
+process.env.CLIENT_DIR = TEST_CLIENT
 
 let server
 let BASE
@@ -48,6 +55,7 @@ after(async () => {
   for (const f of [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`]) {
     try { fs.rmSync(f, { force: true }) } catch { /* ignore locked temp file */ }
   }
+  try { fs.rmSync(TEST_CLIENT, { recursive: true, force: true }) } catch { /* ignore */ }
 })
 
 async function api(method, p, { token, body } = {}) {
@@ -139,6 +147,28 @@ test('account: PATCH profile name reflects in /me', async () => {
   assert.equal((await api('GET', '/api/auth/me', { token })).json.user.name, 'New Name')
 })
 
+test('account: companion prefs live on the user, merge key by key and survive a re-login', async () => {
+  const { token, email: e } = await newUser('Prefs User')
+  /* A brand-new account has saved nothing yet — the client reads {} and keeps its
+     local defaults rather than seeing a null it has to guard against. */
+  assert.deepEqual((await api('GET', '/api/auth/me', { token })).json.user.prefs, {})
+
+  const first = await api('PATCH', '/api/user/profile', { token, body: { prefs: { language: 'ur', assistantName: 'Aira' } } })
+  assert.equal(first.status, 200)
+  assert.equal(first.json.user.prefs.language, 'ur')
+
+  /* Second write sends only the name: the language must not be blanked. */
+  const second = await api('PATCH', '/api/user/profile', { token, body: { prefs: { assistantName: 'Zara' } } })
+  assert.equal(second.json.user.prefs.language, 'ur', 'prefs merge, they do not replace')
+  assert.equal(second.json.user.prefs.assistantName, 'Zara')
+
+  const again = await api('POST', '/api/auth/login', { body: { email: e, password: 'secret123' } })
+  assert.equal(again.json.user.prefs.language, 'ur', 'the choice follows the account, not the browser')
+
+  assert.equal((await api('PATCH', '/api/user/profile', { token, body: { prefs: { language: 'klingon' } } })).status, 400)
+  assert.equal((await api('PATCH', '/api/user/profile', { token, body: { prefs: { apiKey: 'nope' } } })).status, 400, 'unknown keys are refused')
+})
+
 test('account: change email needs the current password, then only the new one logs in', async () => {
   const { token, email: oldEmail } = await newUser()
   const newEmail = email()
@@ -179,18 +209,18 @@ test('chat streams SSE and terminates with [DONE]', async () => {
   assert.ok(/"delta"/.test(r.text), 'emits delta chunks')
 })
 
-test('clear image request returns a Flux URL (deterministic, no LLM)', async () => {
+test('clear image request returns the image proxy path (deterministic, no LLM)', async () => {
   const { token } = await newUser()
   const r = await api('POST', '/api/chat/completions', { token, body: { message: 'generate an image of a red fox in snow', stream: true } })
-  assert.ok(r.text.includes('image.pollinations.ai'), 'image URL present')
-  assert.ok(r.text.includes('model=flux'), 'upgraded to flux for quality')
+  assert.ok(r.text.includes('/api/images/generate'), 'image proxy path present (token stays server-side)')
+  assert.ok(r.text.includes('prompt='), 'prompt carried to the proxy')
 })
 
 test('adult image prompt is refused and builds no URL', async () => {
   const { token } = await newUser()
   const r = await api('POST', '/api/chat/completions', { token, body: { message: 'make an image of a nude person', stream: true } })
   assert.match(r.text, /adult\/NSFW/i)
-  assert.ok(!r.text.includes('image.pollinations.ai'), 'no image URL for NSFW')
+  assert.ok(!r.text.includes('/api/images/generate'), 'no image URL for NSFW')
 })
 
 test('remember… auto-saves a memory visible via GET /api/memory', async () => {
@@ -214,7 +244,7 @@ test('image tool runs for real; NSFW is blocked', async () => {
   const { token } = await newUser()
   const ok = await api('POST', '/api/tools/image_generator/run', { token, body: { prompt: 'a serene mountain lake at dawn' } })
   assert.equal(ok.status, 201)
-  assert.ok(ok.json.output.imageUrl.includes('model=flux'))
+  assert.ok(ok.json.output.imageUrl.includes('/api/images/generate'))
 
   const bad = await api('POST', '/api/tools/image_generator/run', { token, body: { prompt: 'a nude portrait' } })
   assert.equal(bad.status, 201)
@@ -311,6 +341,63 @@ test('stream cancellation: a pre-aborted signal produces no deltas (mock mode)',
   assert.equal(count, 0, 'an aborted stream must stop yielding immediately, not keep billing tokens')
 })
 
+/* ---- Pinned reply language: the code, not the prompt, has the last word ----
+   A free-tier model told "MANDATORY: Urdu script" still answers a Roman-typed
+   first message in Roman letters. These tests drive the guard with a fake stream
+   factory so the retry path is proven without a provider or an API key. */
+
+async function* toWords(text) {
+  for (const w of text.split(/(\s+)/)) if (w) yield { content: w, model: 'test-model' }
+  yield { content: '', model: 'test-model', usage: { total_tokens: 12 } }
+}
+const ROMAN_REPLY = 'Awais, bilkul! Maine aapki preferences yaad kar li hain.'
+const URDU_REPLY = 'جناب، آپ کی ترجیحات محفوظ کر دی گئی ہیں۔'
+
+async function drain(stream) {
+  const chunks = []
+  for await (const chunk of stream) chunks.push(chunk)
+  return chunks.map((c) => c.content).join('')
+}
+
+test('language guard: a Roman attempt under a pinned Urdu setting is re-asked before the client sees it', async () => {
+  const { guardedStream } = await import('../src/services/ai.js')
+  const directives = []
+  const open = (params) => { directives.push(params.extraDirective || null); return toWords(directives.length === 1 ? ROMAN_REPLY : URDU_REPLY) }
+  const text = await drain(guardedStream({ language: 'ur', guard: true }, open))
+  assert.equal(directives.length, 2, 'the wrong-script call is retried exactly once')
+  assert.match(directives[1], /Urdu script/, 'the retry carries a corrective directive')
+  assert.equal(text, URDU_REPLY, 'nothing from the failed attempt leaks to the client')
+})
+
+test('language guard: a reply in the right script streams live and is never re-asked', async () => {
+  const { guardedStream } = await import('../src/services/ai.js')
+  let calls = 0
+  const open = () => { calls += 1; return toWords(URDU_REPLY) }
+  const text = await drain(guardedStream({ language: 'ur', guard: true }, open))
+  assert.equal(calls, 1, 'a correct Urdu answer costs one model call')
+  assert.equal(text, URDU_REPLY)
+})
+
+test('language guard: a second wrong answer is still delivered — one retry, never a blank reply', async () => {
+  const { guardedStream } = await import('../src/services/ai.js')
+  let calls = 0
+  const open = () => { calls += 1; return toWords(ROMAN_REPLY) }
+  const text = await drain(guardedStream({ language: 'ur', guard: true }, open))
+  assert.equal(calls, 2, 'the guard gives up after one retry instead of looping')
+  assert.equal(text, ROMAN_REPLY, 'the user gets the imperfect answer rather than silence')
+})
+
+test('scriptViolation judges the script of a reply, not its words', async () => {
+  const { scriptViolation } = await import('../src/services/ai.js')
+  assert.equal(scriptViolation(ROMAN_REPLY, 'ur'), 'urdu', 'Roman letters under Urdu-first is a violation')
+  assert.equal(scriptViolation(URDU_REPLY, 'ur'), null)
+  assert.equal(scriptViolation('ٹھیک ہے main theek hoon', 'hinglish'), 'latin', 'Hinglish is Latin script by definition')
+  assert.equal(scriptViolation('I am doing great, thanks!', 'en'), null)
+  assert.equal(scriptViolation('main ekdum theek hoon', 'en'), null, 'Roman text is legal for English too — the guard only checks script')
+  assert.equal(scriptViolation('kya chal raha hai', 'auto'), null, 'auto mirrors the user, so nothing is ever wrong')
+  assert.equal(scriptViolation('A', 'ur'), null, 'too little to judge is never retried on a hunch')
+})
+
 /* ---- User-attached reference images (Ctrl+V / 📎 in the composer) ---- */
 
 const PNG_1PX = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -380,4 +467,56 @@ test('cors: local origins are reflected in dev, foreign origins never', async ()
   } finally {
     config.corsAllowLocalOrigins = true
   }
+})
+
+test('one process: the API also serves the built app on the same origin as /api', async () => {
+  const page = await api('GET', '/')
+  assert.equal(page.status, 200)
+  assert.match(page.headers.get('content-type') || '', /text\/html/, 'index.html wins over the docs JSON')
+  assert.match(page.text, /Nexora test shell/)
+  const asset = await api('GET', '/assets/shell.js')
+  assert.equal(asset.status, 200, 'build assets resolve relative to the page')
+  const health = await api('GET', '/health')
+  assert.equal(health.json.service, 'nexora-backend', 'the API still answers on that same origin')
+  const ghost = await api('GET', '/definitely-not-a-file')
+  assert.equal(ghost.status, 404, 'unknown paths stay API 404s, never a blank page')
+  assert.equal(ghost.json.error.type, 'not_found')
+})
+
+test('schedule: auth guard, CRUD, ownership, reminders and dedup', async () => {
+  assert.equal((await api('GET', '/api/schedule')).status, 401, 'listing needs a token')
+  const { token } = await newUser()
+  const other = (await newUser()).token
+
+  assert.equal((await api('POST', '/api/schedule', { token, body: { title: 'x', dueAt: 'not-a-date' } })).status, 400, 'bad date rejected')
+  const soonIso = new Date(Date.now() + 2 * 3600 * 1000).toISOString()
+  const pastIso = new Date(Date.now() - 60 * 1000).toISOString()
+  const farIso = new Date(Date.now() + 5 * 86400 * 1000).toISOString()
+  const t1 = (await api('POST', '/api/schedule', { token, body: { title: 'Submit bill', notes: 'paperwork', dueAt: soonIso } })).json
+  const t2 = (await api('POST', '/api/schedule', { token, body: { title: 'Call bank', dueAt: pastIso } })).json
+  await api('POST', '/api/schedule', { token, body: { title: 'Trip', dueAt: farIso } })
+  assert.ok(t1.id.startsWith('task_'), 'prefixed id')
+  assert.equal((await api('GET', '/api/schedule', { token })).json.data.length, 3)
+
+  const rem = await api('POST', '/api/schedule/reminders', { token, body: {} })
+  assert.equal(rem.status, 200)
+  assert.deepEqual(rem.json.upcoming, [t1.id], 'inside 24h = day-before nudge')
+  assert.deepEqual(rem.json.due, [t2.id], 'past due = day-of nudge')
+  assert.match(rem.json.content, /Submit bill/)
+  assert.match(rem.json.content, /Call bank/)
+  assert.equal(rem.json.creditsCharged, 0, 'mock mode is free')
+
+  assert.equal((await api('POST', '/api/schedule/reminders/ack', { token, body: { ids: [t1.id, t2.id] } })).json.acked, 2)
+  const rem2 = await api('POST', '/api/schedule/reminders', { token, body: {} })
+  assert.equal(rem2.json.content, '', 'acked reminders never repeat')
+
+  assert.equal((await api('PATCH', `/api/schedule/${t1.id}`, { token: other, body: { status: 'done' } })).status, 404, 'non-owner cannot touch a task')
+  assert.equal((await api('DELETE', `/api/schedule/${t1.id}`, { token: other })).status, 404)
+  const done = await api('PATCH', `/api/schedule/${t1.id}`, { token, body: { status: 'done' } })
+  assert.equal(done.json.status, 'done')
+  /* editing the date re-arms the nudge: the old stamp only covers the old due_at */
+  const moved = await api('PATCH', `/api/schedule/${t1.id}`, { token, body: { dueAt: pastIso, status: 'open' } })
+  assert.equal(moved.json.remindedAt, null, 'date change disarms the stamp')
+  assert.equal((await api('DELETE', `/api/schedule/${t1.id}`, { token })).status, 204)
+  assert.equal((await api('GET', '/api/schedule', { token })).json.data.length, 2)
 })

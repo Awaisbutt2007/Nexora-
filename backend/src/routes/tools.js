@@ -1,11 +1,12 @@
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
+import { publicModelLabel } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
 import { aiLimiter } from '../middleware/rateLimit.js'
 import { deductCredits, ensureCredits } from '../services/credits.js'
-import { buildImageUrl, isNsfwPrompt } from '../services/images.js'
+import { imageProxyPath, isNsfwPrompt } from '../services/images.js'
 import { completeChat } from '../services/ai.js'
 
 const router = Router()
@@ -161,8 +162,10 @@ async function buildToolOutput(tool, payload, ctx) {
       : {
           type: 'image',
           prompt,
-          imageUrl: buildImageUrl(prompt),
-          note: 'Rendered with the free Pollinations (Flux) model. Swap in a funded DALL·E / Flux key in services/images.js for even higher resolution.',
+          imageUrl: imageProxyPath(prompt),
+          /* The answer to "how is this made?" stays off the wire — including in our own
+             friendly captions. Which service renders a picture is operator information. */
+          note: 'Rendered by Nexora’s built-in image engine. If a generator key is added on the server, limits and reliability go up.',
         }
   }
 
@@ -176,7 +179,7 @@ async function buildToolOutput(tool, payload, ctx) {
     userName: ctx.userName,
     persona: ctx.persona,
   })
-  return { type: 'text', prompt, answer: result.content, model: result.model }
+  return { type: 'text', prompt, answer: result.content, model: publicModelLabel(result.model) }
 }
 
 export default router

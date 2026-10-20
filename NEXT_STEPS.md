@@ -8,9 +8,14 @@ real files to touch so a future session can execute without re-discovery.
    are paste-only today. Either (a) rename them in `routes/tools.js` `TOOL_CATALOG`
    + `Nexora.jsx` UI to "…from pasted text", or (b) implement real ingestion (P1-4/5).
    Do (a) now so the UI never over-promises.
-2. **`/health` information disclosure** (audit §10): stop returning AI mode/model/
-   voice provider in `backend/src/index.js` when `NODE_ENV=production`; keep a
-   minimal `{ ok: true }`. Add a test asserting the fields are absent in prod.
+2. **`/health` information disclosure** (audit §10): ✅ **done** — `/health` now reports
+   readiness only (`status`, `service`, `time`, `ai: live|text-only|mock`, `voice:
+   ready|unavailable (reason)`). The model id, voice model and base URL are behind
+   `HEALTH_VERBOSE=1` for the operator's own machine, and the SSE chunks, the
+   non-streaming body, the conversation rows, the tool-run payload and the voice token
+   all answer `nexora` instead of the engine name (see `publicModelLabel()` in
+   `backend/src/config.js`). Asserted by
+   `test('security: the API never hands the client the engine name')`.
 3. **Provider timeout on AI calls** (Part 14): pass a `timeout`/`maxRetries` to the
    OpenAI client in `services/ai.js` `createClient()` so a hung provider can't
    wedge a request/credit.

@@ -92,6 +92,7 @@ npm run audit:all
 
 ## 7. What is NOT yet ready for production
 - No deployment manifest/IaC chosen yet (container/PaaS config still to be authored).
-- `/health` discloses AI/voice config (harden before public deploy — `NEXT_STEPS.md` P0-2).
+- `/health` answers with readiness only; never set `HEALTH_VERBOSE=1` in a public
+  deployment (it puts the engine and voice model ids back into that public response).
 - No metrics/alerting; provider timeouts on AI calls are default (`NEXT_STEPS.md` P0-3).
 - Realtime voice / Google Sign-In / image gen are unverified without live keys.

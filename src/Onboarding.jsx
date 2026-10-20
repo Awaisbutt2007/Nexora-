@@ -42,6 +42,20 @@ const CHARACTERS = {
   ],
 }
 
+/* Each persona keeps its own delivery. The stage-2 preview AND the stage-3 reveal
+   read the SAME profile, so the voice you pick is the voice you keep hearing. The
+   old bug: the reveal spoke everyone at a flat 0.95, which sounded like the first
+   (Girlfriend) sample no matter who you chose. rate = speed, pitch = brightness. */
+const VOICE_PROFILES = {
+  girlfriend: { rate: 1.0, pitch: 0.06 },
+  boyfriend: { rate: 1.0, pitch: 0.06 },
+  partner: { rate: 0.96, pitch: 0 },
+  bestfriend: { rate: 1.12, pitch: 0.08 },
+  assistant: { rate: 1.03, pitch: -0.02 },
+  listener: { rate: 0.82, pitch: -0.08 },
+}
+const voiceProfile = (id) => VOICE_PROFILES[id] || { rate: 0.98, pitch: 0 }
+
 function saveAiProfile(patch) {
   try {
     const current = JSON.parse(localStorage.getItem(AI_PROFILE_KEY) || '{}')
@@ -257,8 +271,9 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
       + (/natural|neural|online|premium|enhanced/i.test(v.name) ? 2 : 0)
       + (genderName.test(v.name) ? 1 : 0)
     const voice = voices.slice().sort((a, b) => score(b) - score(a))[0]
-    const basePitch = voiceGender === 'female' ? 1.15 : 0.9
-    const baseRate = char.id === 'bestfriend' ? 1.12 : char.id === 'listener' ? 0.82 : 0.98
+    const prof = voiceProfile(char.id)
+    const basePitch = (voiceGender === 'female' ? 1.15 : 0.9) + prof.pitch
+    const baseRate = prof.rate
     const segments = char.line.split(/(?<=[…!?.])\s+/).filter(Boolean)
     segments.forEach((text, i) => {
       const punch = /[!?]$/.test(text) ? 0.24 : /…$/.test(text) ? -0.14 : 0
@@ -443,7 +458,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
   const handleVoiceContinue = () => {
     if (!character) return
     stopPlayback()
-    saveAiProfile({ voiceGender, character: character.id })
+    saveAiProfile({ voiceGender, character: character.id, characterName: character.name, characterDesc: character.desc })
     setStage(3)
   }
 
@@ -458,7 +473,10 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
       + (/natural|neural|online|premium|enhanced/i.test(v.name) ? 2 : 0)
       + (genderName.test(v.name) ? 1 : 0)
     const voice = voices.slice().sort((a, b) => score(b) - score(a))[0]
-    const basePitch = voiceGender === 'female' ? 1.15 : 0.9
+    /* Use the SAME persona profile as the preview, so the reveal reflects the
+       character the user actually picked instead of a one-size-fits-all tone. */
+    const prof = voiceProfile(character?.id)
+    const basePitch = (voiceGender === 'female' ? 1.15 : 0.9) + prof.pitch
     const segments = text.replace(/\n/g, ' ').split(/(?<=[…!?.])\s+/).filter(Boolean)
     segments.forEach((seg, i) => {
       const punch = /[!?]$/.test(seg) ? 0.24 : /…$/.test(seg) ? -0.14 : 0
@@ -466,7 +484,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
       u.lang = 'ur-PK'
       if (voice && score(voice) > 0) u.voice = voice
       u.pitch = Math.min(1.7, Math.max(0.5, basePitch + punch + (i % 2 === 0 ? 0.06 : -0.05)))
-      u.rate = Math.min(1.4, Math.max(0.7, 0.95 + (punch > 0 ? 0.08 : punch < 0 ? -0.1 : 0)))
+      u.rate = Math.min(1.4, Math.max(0.7, prof.rate + (punch > 0 ? 0.08 : punch < 0 ? -0.1 : 0)))
       if (i === 0) u.onstart = () => onstart?.()
       if (i === segments.length - 1) u.onend = () => onend?.()
       window.speechSynthesis.speak(u)
@@ -480,10 +498,12 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
     if (stage !== 3) return undefined
     setIntroDone(false)
     let fallback = 0
+    /* Start talking almost immediately so the spoken intro keeps pace with the
+       typewriter instead of arriving after the whole line is already on screen. */
     const timer = setTimeout(() => {
       speakLine(introLine, { onend: () => setIntroDone(true) })
       fallback = setTimeout(() => setIntroDone(true), 20000)
-    }, 1200)
+    }, 250)
     return () => { clearTimeout(timer); clearTimeout(fallback); window.speechSynthesis?.cancel() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage])
@@ -494,6 +514,17 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
     try { localStorage.removeItem(PROGRESS_KEY) } catch { /* private mode */ }
     const finishedUser = updatedUserRef.current
       || (name.trim() ? { ...userProfile, name: name.trim() } : null)
+    /* Commit the chosen persona to the account too, so the voice picked here drives
+       chat, tools and the live call across every device — not just this browser's
+       localStorage (which is per-origin and dies on logout). Best-effort: the local
+       ai_profile seed already carries this device if the call fails. */
+    try {
+      const token = loadSession()?.token
+      if (token && character) {
+        const persona = character.desc ? `${character.name} — ${character.desc}` : character.name
+        updateProfile(token, { prefs: { assistantName: aiName.trim() || 'Aira', persona, gender: voiceGender } }).catch(() => {})
+      }
+    } catch { /* offline — the local seed still carries this device */ }
     onComplete(finishedUser)
   }
 
@@ -583,16 +614,20 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
                 <button type="button" className={voiceGender === 'female' ? 'selected' : ''} onClick={() => changeGender('female')}>Female</button>
                 <button type="button" className={voiceGender === 'male' ? 'selected' : ''} onClick={() => changeGender('male')}>Male</button>
               </div>
-              <p className="voice-sub">Now pick a character. Click one to hear it.</p>
+              <p className="voice-sub">Now pick a character. Click anywhere on a row to hear and select it.</p>
               <ul className="char-list">
                 {CHARACTERS[voiceGender].map((char) => (
-                  <li key={char.id} className={character?.id === char.id ? 'picked' : ''}>
+                  <li
+                    key={char.id}
+                    className={`pickable${character?.id === char.id ? ' picked' : ''}`}
+                    onClick={() => previewVoice(char)}
+                  >
                     <strong>{char.name}</strong>
                     <span>{char.desc}</span>
                     <button
                       type="button"
                       className={`char-play${playingId === char.id ? ' playing' : ''}`}
-                      onClick={() => previewVoice(char)}
+                      onClick={(event) => { event.stopPropagation(); previewVoice(char) }}
                       aria-label={`Hear ${char.name} voice`}
                     >
                       {playingId === char.id ? <WaveBars analyserRef={analyserRef} /> : '▶'}
@@ -687,7 +722,7 @@ export default function Onboarding({ userProfile, source = 'google', onComplete 
 
         <div className="onboarding-visual">
           {/* Particles morph: orb → the chosen gender portrait */}
-          <NanoParticles count={30000} shape={particleShape} />
+          <NanoParticles count={30000} shape={particleShape} focusY={1.05} />
         </div>
       </section>
     </main>

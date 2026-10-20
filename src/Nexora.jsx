@@ -1,7 +1,8 @@
-import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import { lazy, Suspense, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import './Nexora.css'
 import './typography.css'
+import ChatPop from './ChatPop.jsx'
 import SignIn from './SignIn.jsx'
 import CursorTrail from './CursorTrail.jsx'
 import AnimeEffects from './AnimeEffects.jsx'
@@ -24,6 +25,7 @@ import {
   updatePassword,
   updateProfile,
   uploadChatImage,
+  attachMessageImages,
   resourceUrl,
   upgradePlan,
   desktopAudit,
@@ -36,13 +38,23 @@ import {
   desktopPlan,
   desktopRevoke,
   desktopStop,
+  listSchedule,
+  createScheduleTask,
+  updateScheduleTask,
+  deleteScheduleTask,
+  fetchScheduleReminders,
+  ackScheduleReminders,
 } from './api/nexora.js'
+/* Her own eyes on the app: real screenshots of the live UI and of the particle face. */
+import { captureCurrentPage, captureNode, captureSelfFace } from './selfCapture.js'
 
 const ThreeHero = lazy(() => import('./ThreeHero.jsx'))
 const Onboarding = lazy(() => import('./Onboarding.jsx'))
 const VoiceCall = lazy(() => import('./VoiceCall.jsx'))
 /* The chosen AI portrait, reused above the live conversation */
 const NanoParticles = lazy(() => import('./NanoParticles.jsx'))
+/* The memory vault: three.js brain + cables, only ever loaded when the door opens */
+const MemoryVault = lazy(() => import('./MemoryVault.jsx'))
 
 /* Flag kept while a new (Google or sign-up) user still has to finish the "what should I call you" step */
 const ONBOARDING_KEY = 'nexora_onboarding_pending'
@@ -51,13 +63,18 @@ const ONBOARDING_KEY = 'nexora_onboarding_pending'
    comes from the onboarding wizard so Aira answers to the name the user gave. */
 const VOICE_PREFS_KEY = 'nexora_voice_prefs'
 const ONBOARDING_PROGRESS_KEY = 'nexora_onboarding_progress'
+/* The finished onboarding profile (assistant name + chosen character) — durable,
+   cleared only on logout. loadVoicePrefs seeds the persona from HERE, not from the
+   transient progress key, because handleFinish deletes the progress key the moment
+   onboarding ends and the workspace mounts. */
+const AI_PROFILE_KEY = 'nexora_ai_profile'
 /* "Don't message me right now" — set when the user explicitly asks for quiet,
    survives reloads, and is only lifted when the user writes again. */
 const PROACTIVE_MUTE_KEY = 'nexora_proactive_muted'
 
 /* OpenAI Realtime built-in voices (docs-verified list) */
 const VOICE_OPTIONS = [
-  ['marin', 'Marin', 'warm · natural female — recommended for Aira'],
+  ['marin', 'Marin', 'warm · natural female — recommended default'],
   ['shimmer', 'Shimmer', 'soft · expressive female'],
   ['ballad', 'Ballad', 'light · melodic female'],
   ['coral', 'Coral', 'breathy · friendly'],
@@ -70,9 +87,22 @@ const VOICE_OPTIONS = [
 ]
 const VOICE_LANGUAGES = [['auto', 'Auto — mix freely (English + Urdu + Roman Urdu)'], ['en', 'English first'], ['ur', 'Urdu first'], ['hinglish', 'Hinglish (Roman Hindi-Urdu)']]
 
-function loadVoicePrefs() {
+/* The five choices the workspace remembers, in the shape the backend stores them. */
+const voicePrefsPayload = (p) => ({ voice: p.voice, language: p.language, assistantName: p.assistantName, persona: p.persona, gender: p.gender })
+
+const readLocalPrefs = () => {
+  try { return JSON.parse(localStorage.getItem(VOICE_PREFS_KEY) || '{}') } catch { return {} }
+}
+
+/* `local` is this browser's copy, `account` the one saved on the signed-in user
+   (PATCH /api/user/profile) — the account wins. localStorage is per-origin and is
+   cleared on logout, so leaning on it alone silently put someone who had picked
+   "Urdu first" back on 'auto' the moment they opened another address, and Hinglish
+   answers looked like a setting being ignored. Values are validated here either
+   way, so a hand-edited blob can't push a bad language into the chat schema. */
+function loadVoicePrefs(local, account) {
   try {
-    const saved = JSON.parse(localStorage.getItem(VOICE_PREFS_KEY) || '{}')
+    const saved = { ...local, ...(account && typeof account === 'object' ? account : {}) }
     /* Onboarding seeds the defaults; anything the user later edits in Settings
        (persisted in VOICE_PREFS_KEY) wins over the wizard values. */
     let aiName = 'Aira'
@@ -80,7 +110,7 @@ function loadVoicePrefs() {
     /* Which particle portrait the user assembled at onboarding */
     let gender = 'female'
     try {
-      const ob = JSON.parse(localStorage.getItem(ONBOARDING_PROGRESS_KEY) || '{}')
+      const ob = JSON.parse(localStorage.getItem(AI_PROFILE_KEY) || '{}')
       if (ob.aiName) aiName = ob.aiName
       if (ob.characterName) {
         persona = ob.characterDesc ? `${ob.characterName} — ${ob.characterDesc}` : ob.characterName
@@ -88,7 +118,10 @@ function loadVoicePrefs() {
       if (ob.voiceGender === 'male' || ob.voiceGender === 'female') gender = ob.voiceGender
     } catch { /* no wizard data */ }
     if (typeof saved.assistantName === 'string' && saved.assistantName.trim()) aiName = saved.assistantName.trim()
-    if (typeof saved.persona === 'string') persona = saved.persona
+    /* Only a NON-EMPTY saved persona overrides the onboarding seed. An account that
+       predates the persona fix can carry persona:'' — letting that win silently wiped
+       the character the user picked, which is exactly the "voice didn't stick" bug. */
+    if (typeof saved.persona === 'string' && saved.persona.trim()) persona = saved.persona
     if (saved.gender === 'male' || saved.gender === 'female') gender = saved.gender
     return {
       voice: VOICE_OPTIONS.some(([id]) => id === saved.voice) ? saved.voice : 'marin',
@@ -115,7 +148,10 @@ function initialNavHash() {
   return NAV_SECTIONS.some(([hash]) => hash === window.location.hash) ? window.location.hash : '#home'
 }
 
-const navItems = [['Home', '⌂'], ['Chat', '◌'], ['History', '⧗'], ['Tools', '▦'], ['Memory', '◈'], ['Settings', '⚙']]
+const navItems = [['Chat', '◌'], ['Schedule', '⏰'], ['Memory', '◈'], ['Tools', '▦'], ['Desktop', '⌗'], ['Settings', '⚙']]
+/* Schedule chips are a lookup, not a render-time clock read (oxlint purity):
+   refreshTasks stamps each task with its phase while the data lands. */
+const SCHEDULE_CHIP = { due: ['Due now', 'chip-due'], soon: ['Reminds tomorrow', 'chip-soon'], planned: ['Planned', 'chip-planned'], done: ['Done ✓', 'chip-done'] }
 const tools = [
   ['▧', 'Image Generator', 'Create striking images from a simple prompt.', 'violet', 'image_generator', 'Describe the image you want — scene, style, mood…'],
   ['⌘', 'Code Assistant', 'Write, debug, and explain code with context.', 'blue', 'code_assistant', 'Describe the code you need: language, inputs, expected behaviour…'],
@@ -328,17 +364,17 @@ function Landing({ onLogin, onNavigate, isLoggedIn, userProfile, onUpgrade }) {
             <div className="mockup-body">
               <aside className="mockup-sidebar">
                 <div className="mockup-avatar N">N</div>
-                <div className="mockup-side-link active"><b>⌂</b><span>Home</span></div>
-                <div className="mockup-side-link"><b>◌</b><span>Chat</span></div>
-                <div className="mockup-side-link"><b>⧗</b><span>History</span></div>
-                <div className="mockup-side-link"><b>▦</b><span>Tools</span></div>
+                <div className="mockup-side-link active"><b>◌</b><span>Chat</span></div>
+                <div className="mockup-side-link"><b>⏰</b><span>Schedule</span></div>
                 <div className="mockup-side-link"><b>◈</b><span>Memory</span></div>
+                <div className="mockup-side-link"><b>▦</b><span>Tools</span></div>
+                <div className="mockup-side-link"><b>⌗</b><span>Desktop</span></div>
                 <div className="mockup-side-link"><b>⚙</b><span>Settings</span></div>
               </aside>
               <section className="mockup-content">
                 <div className="mockup-topbar">
                   <span className="mockup-brand"><b>N</b>Nexora</span>
-                  <div className="mockup-nav"><em className="active">Chat</em><em>History</em><em>Tools</em><em>Desktop</em></div>
+                  <div className="mockup-nav"><em className="active">Chat</em><em>Memory</em><em>Tools</em><em>Desktop</em></div>
                   <span className="mockup-talk">◉ Talk</span>
                   <div className="mockup-profile"><b>A</b><em>Awai Butt</em></div>
                 </div>
@@ -558,12 +594,51 @@ function Landing({ onLogin, onNavigate, isLoggedIn, userProfile, onUpgrade }) {
 /* A fenced block ends at its closing ``` OR at end-of-string, so a truncated or
    still-streaming reply (model never emitted the closing fence) still renders as
    a real code block with a copy button instead of leaking raw ``` markup. */
-const BLOCK_RE = /(```[^\n]*\n?[\s\S]*?(?:```|$)|!\[[^\]]*\]\([^)]+\))/g
+const BLOCK_RE = /(```[^\n]*\n?[\s\S]*?(?:```|$)|!\[[^\]]*\]\([^)]+\)|\[SCREENSHOT:[a-z]+\])/g
 const IMAGE_TOKEN_RE = /!\[[^\]]*\]\(([^)]+)\)/
 /* Mirror of the backend NSFW gate so a model-authored IMAGE: marker can't slip an
    adult picture past the client either. */
 const CLIENT_NSFW = /(nude|naked|nsfw|porn|sex|sexy|erotic|xxx|boob|tit|penis|vagina|breast|nipple|anal|blowjob|orgasm|bikini|lingerie|topless|see[\s-]?through|onlyfans|hentai|chudai|chod|nangi|nanga|jism|shahwat|فحش|ننگی)/i
-const IMG_QUALITY = 'width=1024&height=1024&nologo=true&enhance=true&model=flux'
+
+/* --- Self-screenshots ---------------------------------------------------------
+   The assistant emits [SCREENSHOT:face] (etc.) and the app answers with a REAL
+   photograph of itself, captured by src/selfCapture.js. The token stays in the
+   stored reply — it is what she wrote — so it renders as this caption, and the
+   picture rides on the turn's images array. Mirrors the backend's isSelfUiRequest
+   on purpose: the same phrase must read the same way on both sides. */
+const SHOT_TOKEN_RE = /^\[SCREENSHOT:([a-z]+)\]$/i
+const SHOT_TARGETS = {
+  face: { face: true },
+  screen: { full: true },
+  chat: {},
+  settings: { view: 'Settings' },
+  memory: { view: 'Memory' },
+}
+const SHOT_LABELS = {
+  face: '📸 A real screenshot of my own face',
+  settings: '📸 A real screenshot of my settings',
+  memory: '📸 A real screenshot of my saved memories',
+  screen: '📸 A real screenshot of my screen right now',
+  chat: '📸 A real screenshot of this chat',
+}
+const SELF_OWNER_RE = /\b(apna|apni|apne|apsa|tumhara|tumhari|tumhare|tumhare|tera|teri|terey|teree|aapka|aapki|aapke|your|yours|self|khud|khud|apni\s?hi)\b/i
+const SELF_UI_RE = /\b(chehra|chehry|chehray|shakal|soorat|surat|face|avatar|profile\s?pic|dp|setting|settings|screen|screenshot|ui|interface|page|memory|memories|yaadein|yaaden|roop|look|appearance|tasveer|image|picture)\b/i
+
+/* The marker is machine markup, not prose: it renders as a caption chip inside the
+   reply, but must never leak into a quote preview or the text sent back to the model. */
+const withoutShotMarkers = (text) => String(text || '').replace(/\s*\[SCREENSHOT:[a-z]+\]/gi, '').trim()
+
+/* When she forgets the marker, the app still has to know WHAT to photograph. */
+function selfUiTargets(text) {
+  const t = String(text || '').toLowerCase()
+  const out = []
+  if (/chehra|chehr|shakal|soorat|surat|face|avatar|roop|appearance|\bdp\b/.test(t)) out.push('face')
+  if (/setting/.test(t)) out.push('settings')
+  if (/memor|yaadein|yaaden/.test(t)) out.push('memory')
+  if (!out.length && /screen|screenshot|\bui\b|interface|page/.test(t)) out.push('screen')
+  if (!out.length) out.push('face')
+  return out.slice(0, 2)
+}
 
 /* Inline markdown → React nodes (auto-escaped, no dangerouslySetInnerHTML). Handles
    `code`, **bold**, __bold__, *italic*, _italic_ and [label](http…) links. Only
@@ -681,6 +756,7 @@ function renderChatContent(text) {
       if (seg) nodes.push(...renderMarkdown(seg, `t${t++}`))
     }
     const token = match[0]
+    const shot = SHOT_TOKEN_RE.exec(token.trim())
     if (token.startsWith('```')) {
       /* Only strip a closing fence when one was actually emitted. */
       const inner = token.endsWith('```') ? token.slice(3, -3) : token.slice(3)
@@ -688,6 +764,8 @@ function renderChatContent(text) {
       const lang = nl >= 0 ? inner.slice(0, nl).trim().split(/\s+/)[0] : ''
       const code = (nl >= 0 ? inner.slice(nl + 1) : inner).replace(/\n+$/, '')
       nodes.push(<CodeBlock key={`code-${n++}`} lang={lang} code={code} />)
+    } else if (shot) {
+      nodes.push(<div key={`shot-${n++}`} className="chat-shot-caption">{SHOT_LABELS[shot[1].toLowerCase()] || SHOT_LABELS.screen}</div>)
     } else {
       const m = IMAGE_TOKEN_RE.exec(token)
       const url = (m ? m[1] : '').trim()
@@ -695,9 +773,9 @@ function renderChatContent(text) {
         const desc = url.slice(6).trim()
         nodes.push(CLIENT_NSFW.test(desc)
           ? <span key={`blk-${n++}`} className="chat-img-blocked">🚫 Adult content is not allowed on Nexora.</span>
-          : <ChatImage key={`img-${n++}`} src={`https://image.pollinations.ai/prompt/${encodeURIComponent(desc)}?${IMG_QUALITY}`} />)
+          : <ChatImage key={`img-${n++}`} src={resourceUrl(`/api/images/generate?prompt=${encodeURIComponent(desc)}`)} />)
       } else if (url) {
-        nodes.push(<ChatImage key={`img-${n++}`} src={url} />)
+        nodes.push(<ChatImage key={`img-${n++}`} src={resourceUrl(url)} />)
       }
     }
     last = match.index + token.length
@@ -742,39 +820,64 @@ function CodeBlock({ lang, code }) {
 }
 
 /* A generated image with a loading state, a click-to-open lightbox and a
-   download button. Pollinations can take tens of seconds, so we shimmer a
-   "Generating…" placeholder instead of a broken-image icon and allow retry. */
+   download button. The provider sheds free-tier traffic with a 402/503 whose
+   BODY is still a valid "at its limit" JPEG — a plain <img> would happily render
+   that as a success (the bug behind a fake "Here's your image"). So we load via
+   fetch, trust the HTTP STATUS, auto-retry through the busy windows, and only
+   ever paint a real image (from an object URL) or an honest, tappable error. */
 function ChatImage({ src, alt = 'Generated image' }) {
   const [nonce, setNonce] = useState(0)
   const [status, setStatus] = useState('loading')
+  const [attempt, setAttempt] = useState(0)
+  const [objUrl, setObjUrl] = useState('')
   const [open, setOpen] = useState(false)
-  const url = nonce ? `${src}${src.includes('?') ? '&' : '?'}retry=${nonce}` : src
 
-  const download = async () => {
-    const m = /\/prompt\/([^?]+)/.exec(url)
+  useEffect(() => {
+    let alive = true
+    let created = ''
+    const ctrl = new AbortController()
+    const MAX = 6
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    /* A manual retry bumps `nonce` so the request bypasses any cached 302/error. */
+    const url = nonce ? `${src}${src.includes('?') ? '&' : '?'}r=${nonce}` : src
+    ;(async () => {
+      await sleep(0) /* defer off the effect's synchronous path so no setState lands during setup */
+      for (let i = 1; i <= MAX; i++) {
+        if (!alive) return
+        setAttempt(i)
+        try {
+          const res = await fetch(url, { signal: ctrl.signal, cache: 'no-store' })
+          const ctype = res.headers.get('content-type') || ''
+          if (res.ok && ctype.startsWith('image/')) {
+            const blob = await res.blob()
+            if (!alive) return
+            created = URL.createObjectURL(blob)
+            setObjUrl(created); setStatus('ready'); return
+          }
+          /* Non-ok (402/429/503) = the provider's limit wall, not a real image.
+             Honour Retry-After, else back off, and try again. */
+          const ra = Number(res.headers.get('retry-after'))
+          if (i < MAX) await sleep(Math.min(15000, ra > 0 ? ra * 1000 : 1500 * i))
+        } catch (err) {
+          if (!alive || err.name === 'AbortError') return
+          if (i < MAX) await sleep(1500 * i)
+        }
+      }
+      if (alive) setStatus('error')
+    })()
+    return () => { alive = false; ctrl.abort(); if (created) URL.revokeObjectURL(created) }
+  }, [src, nonce])
+
+  const download = () => {
+    if (!objUrl) return
+    const m = /[?&]prompt=([^&]+)/.exec(src) || /\/prompt\/([^?]+)/.exec(src)
     const base = m ? decodeURIComponent(m[1]).slice(0, 40).replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() : ''
-    const fileName = `${base || 'nexora-image'}.jpg`
-    try {
-      const res = await fetch(url)
-      const blob = await res.blob()
-      const objUrl = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = objUrl
-      a.download = fileName
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(objUrl)
-    } catch {
-      /* CORS blocked the blob — open the raw URL in a new tab so the user can save. */
-      const a = document.createElement('a')
-      a.href = url
-      a.target = '_blank'
-      a.rel = 'noopener'
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-    }
+    const a = document.createElement('a')
+    a.href = objUrl
+    a.download = `${base || 'nexora-image'}.jpg`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
   }
 
   return (
@@ -782,26 +885,18 @@ function ChatImage({ src, alt = 'Generated image' }) {
       {status !== 'ready' && (
         <span className="chat-img-ph" role="status" aria-live="polite">
           {status === 'error'
-            ? <button type="button" onClick={() => { setStatus('loading'); setNonce((v) => v + 1) }}>Image failed — tap to retry</button>
-            : <><span className="chat-img-spin" aria-hidden="true" />Generating image…</>}
+            ? <button type="button" onClick={() => { setStatus('loading'); setObjUrl(''); setAttempt(0); setNonce((v) => v + 1) }}>😕 The image service is busy — tap to try again</button>
+            : <><span className="chat-img-spin" aria-hidden="true" />{attempt > 1 ? `Image service is busy — retrying (${attempt}/6)…` : 'Generating image…'}</>}
         </span>
       )}
-      {status !== 'error' && (
-        <img
-          className="chat-inline-image"
-          src={url}
-          alt={alt}
-          loading="lazy"
-          onLoad={() => setStatus('ready')}
-          onError={() => setStatus('error')}
-          onClick={() => { if (status === 'ready') setOpen(true) }}
-        />
+      {status === 'ready' && objUrl && (
+        <img className="chat-inline-image" src={objUrl} alt={alt} onClick={() => setOpen(true)} />
       )}
       {status === 'ready' && <span className="chat-img-hint" aria-hidden="true">🔍 Click to view</span>}
       {open && createPortal(
         <div className="chat-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" onClick={() => setOpen(false)}>
           <div className="chat-lightbox-inner" onClick={(e) => e.stopPropagation()}>
-            <img src={url} alt={alt} className="chat-lightbox-img" />
+            <img src={objUrl} alt={alt} className="chat-lightbox-img" />
             <div className="chat-lightbox-actions">
               <button type="button" className="chat-lightbox-btn primary" onClick={download}>⬇ Download</button>
               <button type="button" className="chat-lightbox-btn" onClick={() => setOpen(false)}>✕ Close</button>
@@ -852,7 +947,7 @@ function ToolRunner({ entry, token, aiName, persona, isLoggedIn, onLogin, onCred
         {result.blocked
           ? <span className="chat-img-blocked">🚫 {result.note}</span>
           : result.type === 'image'
-            ? <><ChatImage src={result.imageUrl} /><p className="tool-runner-note">{result.note}</p></>
+            ? <><ChatImage src={resourceUrl(result.imageUrl)} /><p className="tool-runner-note">{result.note}</p></>
             : <div className="chat-text">{renderChatContent(result.answer)}</div>}
       </div>}
     </div>
@@ -870,12 +965,12 @@ const desktopActions = [
   { id: 'browser.click', scope: 'browser', risk: 'medium', example: { selector: 'button', by: 'css' } },
   { id: 'browser.fill', scope: 'browser', risk: 'medium', example: { selector: 'input[name=q]', value: 'hello', by: 'css' } },
   { id: 'browser.submit', scope: 'browser', risk: 'high', confirm: true, example: { selector: 'button[type=submit]', by: 'css' } },
-  { id: 'browser.screenshot', scope: 'browser', risk: 'low', example: { name: 'aira-shot' } },
+  { id: 'browser.screenshot', scope: 'browser', risk: 'low', example: { name: 'nexora-shot' } },
   { id: 'apps.launch', scope: 'apps', risk: 'medium', example: { appId: 'chrome' } },
   { id: 'apps.close', scope: 'apps', risk: 'medium', example: { appId: 'chrome' } },
   { id: 'files.list', scope: 'files', risk: 'low', example: { dir: 'C:\\Nexora Sandbox' } },
   { id: 'files.read', scope: 'files', risk: 'low', example: { path: 'C:\\Nexora Sandbox\\build.log' } },
-  { id: 'files.write', scope: 'files', risk: 'high', confirm: true, example: { path: 'C:\\Nexora Sandbox\\notes.txt', content: 'Created by Aira.' } },
+  { id: 'files.write', scope: 'files', risk: 'high', confirm: true, example: { path: 'C:\\Nexora Sandbox\\notes.txt', content: 'Created by Nexora.' } },
   { id: 'files.organize', scope: 'files', risk: 'high', confirm: true, example: { dir: 'C:\\Nexora Sandbox', strategy: 'by-extension', apply: false } },
   { id: 'system.info', scope: 'system', risk: 'low', example: {} },
   { id: 'system.restart', scope: 'system', risk: 'high', confirm: true, example: {} },
@@ -1279,6 +1374,8 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   const [prompt, setPrompt] = useState('')
   const [conversationId, setConversationId] = useState(null)
   const [messages, setMessages] = useState([])
+  /* Reply threading: the one AI turn the next message answers, if any. */
+  const [replyTarget, setReplyTarget] = useState(null)
   const [streaming, setStreaming] = useState(false)
   const [notice, setNotice] = useState(() => selectedTool ? `✦ ${selectedTool} is selected and ready to use!` : '')
   /* Give the toast a fair stay: a notice lives 6s, and a fresh notice restarts the
@@ -1290,15 +1387,29 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   }, [notice])
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
   const [accountDrawerOpen, setAccountDrawerOpen] = useState(false)
+  /* The quick-actions panel opens by itself. Only the Memory vault may fold it
+     away — there it costs the brain its stage height — and the choice lives here
+     so it survives leaving the page and coming back. */
+  const [chatOpen, setChatOpen] = useState(true)
   const chatEndRef = useRef(null)
   /* Aira sometimes starts the conversation herself: if the user goes quiet mid-chat,
      ask the backend for one short check-in. The idle clock and a once-per-pause guard
      live in refs so the interval below never re-subscribes on every keystroke. */
   const lastActivityRef = useRef(Date.now())
   const proactiveBusyRef = useRef(false)
+  /* Consecutive check-ins the user has left unanswered. A friend nudges a couple of
+     times, then lets you be: this climbs per nudge and resets whenever the user
+     actually writes, so an idle tab can never re-create the runaway stream of
+     near-identical prompts the old un-capped loop used to produce. */
+  const proactiveNudgesRef = useRef(0)
   /* Explicit-quiet flag: set when the user's own message asks her not to write.
      Synced from storage on mount so a reload can't re-arm the nudge they refused. */
   const proactiveMutedRef = useRef(false)
+  /* The composer's private state, as far as the idle clock is concerned: was the
+     user mid-message just now, and did they then TAKE BACK what they had typed?
+     Refs (not state) because no keystroke should re-render the workspace twice. */
+  const typedDraftRef = useRef(false)
+  const draftWithdrawnRef = useRef(false)
     /* Holds the AbortController for the in-flight chat stream so the Stop button
        can cancel generation without unmount churn re-subscribing anything. */
     const streamAbortRef = useRef(null)
@@ -1309,18 +1420,32 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
      { id, dataUrl (preview), url (once uploaded), uploading } — max 4 per turn. */
   const [pendingImgs, setPendingImgs] = useState([])
   const attachInputRef = useRef(null)
+  const promptInputRef = useRef(null)
+  /* Set when the composer owes the user a caret: after a send, a stop or opening a
+     thread — so no prompt ever has to be triggered a second time. */
+  const focusComposerRef = useRef(false)
   const attachCountRef = useRef(0)
   const addImgRef = useRef(null)
 
   /* Live voice calls + local voice preferences */
   const [voiceOpen, setVoiceOpen] = useState(false)
-  const [voicePrefs, setVoicePrefs] = useState(() => loadVoicePrefs())
+  /* Derived, not copied: the account prefs can land after this view mounts (session
+     restored from cache, a sign-in, our own write coming back), and re-deriving on
+     render is how the Settings dropdown shows the truth without a sync effect. */
+  const [localPrefs, setLocalPrefs] = useState(readLocalPrefs)
+  const voicePrefs = useMemo(() => loadVoicePrefs(localPrefs, userProfile?.prefs), [localPrefs, userProfile?.prefs])
 
   /* Memory manager (review / edit / delete what Aira remembers) */
   const [memories, setMemories] = useState([])
   const [memLoading, setMemLoading] = useState(false)
   const [memBusy, setMemBusy] = useState(false)
   const [memDraft, setMemDraft] = useState({ key: '', value: '', editingId: null })
+
+  /* Schedule: user-set tasks + the AI nudge waiting to be shown */
+  const [tasks, setTasks] = useState([])
+  const [taskBusy, setTaskBusy] = useState(false)
+  const [taskDraft, setTaskDraft] = useState({ title: '', dueAt: '', notes: '' })
+  const [scheduleReminder, setScheduleReminder] = useState(null)
 
   /* Saved conversations (text + voice share one history — same `conversations` table) */
   const [conversations, setConversations] = useState([])
@@ -1337,8 +1462,9 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   const aiName = voicePrefs.assistantName || 'Nexora'
   /* Landing CTAs and saved sessions enter the workspace with activeView='Home', but
      there is no Home panel here — treat it as Chat so the pane is never blank and a
-     nav button is always the selected one. */
-  const view = activeView === 'Home' ? 'Chat' : activeView
+     nav button is always the selected one. Sessions stored while the page was still
+     called History land on the renamed Memory page. */
+  const view = activeView === 'Home' ? 'Chat' : activeView === 'History' ? 'Memory' : activeView
   /* Which tool card is open in the Tools view (matched by its display title). */
   const selectedEntry = tools.find((t) => t[1] === selectedTool) || null
   /* History search: case-insensitive title filter over the already-loaded list. */
@@ -1359,29 +1485,66 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     try { if (localStorage.getItem(PROACTIVE_MUTE_KEY) === '1') proactiveMutedRef.current = true } catch { /* private mode */ }
   }, [])
 
+  /* Typing holds her back: every keystroke pushes the idle clock forward, so a
+     check-in can never land in the middle of a message being written — the 30s
+     restarts from the LAST keystroke instead of from the previous turn. And if the
+     user then deletes what they had written, that pause is remembered: the next
+     check-in asks about the words they took back, instead of carrying on as if
+     nothing had been typed at all. Only the fact is tracked, never the text — an
+     unfinished draft is not sent anywhere. */
+  useEffect(() => {
+    if (prompt.trim().length >= 2) {
+      lastActivityRef.current = Date.now()
+      typedDraftRef.current = true
+      return
+    }
+    if (typedDraftRef.current) {
+      /* The draft went away on its own — the user withdrew it. Clearing the clock
+         here too gives them a full quiet window before she brings it up. */
+      typedDraftRef.current = false
+      draftWithdrawnRef.current = true
+      lastActivityRef.current = Date.now()
+    }
+  }, [prompt])
+
   /* Idle check-in: when the user goes quiet on an open thread whose last turn is
      Aira's, she reaches out first with something tied to that very conversation.
-     Fires after ~30s and keeps re-arming every 30s while the pause continues, so
-     she offers fresh, on-topic nudges/suggestions until the user replies again. */
+     Fires after ~30s and re-arms up to a small unanswered cap, then waits quietly
+     for the user to return — a couple of nudges is caring, an endless stream is not. */
   useEffect(() => {
     if (!isLoggedIn || !authToken || view !== 'Chat' || !conversationId) return
     const IDLE_PROACTIVE_MS = 30000
+    const MAX_PROACTIVE_NUDGES = 2
     const tick = setInterval(() => {
       if (document.hidden || streamingRef.current || proactiveBusyRef.current) return
       if (proactiveMutedRef.current) return
       if (Date.now() - lastActivityRef.current < IDLE_PROACTIVE_MS) return
+      /* Stop reaching out into a void: after a couple of unanswered check-ins, fall
+         silent until the user writes again (their send resets the counter). */
+      if (proactiveNudgesRef.current >= MAX_PROACTIVE_NUDGES) return
       const last = messagesRef.current[messagesRef.current.length - 1]
       if (!last || last.role !== 'assistant' || last.streaming) return
       proactiveBusyRef.current = true
-      proactiveChat({ token: authToken, conversationId, assistantName: aiName, persona: voicePrefs.persona, language: voicePrefs.language })
+      /* She only asks about the abandoned draft once — whatever the answer, the
+         question has been asked. */
+      const withdrewDraft = draftWithdrawnRef.current
+      const composing = typedDraftRef.current
+      draftWithdrawnRef.current = false
+      proactiveChat({ token: authToken, conversationId, assistantName: aiName, persona: voicePrefs.persona, gender: voicePrefs.gender, language: voicePrefs.language, composing, withdrewDraft })
         .then((r) => {
           const content = (r?.content || '').trim()
           if (content) {
-            setMessages((prev) => [...prev, { id: `local_proactive_${Date.now()}`, role: 'assistant', content, ts: Date.now() }])
-            setNotice(`${aiName} checked in.`)
+            proactiveNudgesRef.current += 1
+            /* A warm line loses all warmth when repeated verbatim, so never render a
+               nudge that just re-says the last assistant turn — count it, stay quiet. */
+            const prev = messagesRef.current[messagesRef.current.length - 1]
+            if (!(prev && prev.role === 'assistant' && String(prev.content).trim() === content)) {
+              setMessages((prevMsgs) => [...prevMsgs, { id: `local_proactive_${Date.now()}`, role: 'assistant', content, ts: Date.now() }])
+              setNotice(`${aiName} checked in.`)
+            }
           }
-          /* Re-arm: restart the idle clock so the next nudge lands ~30s later while
-             the user is still quiet, and clear the in-flight guard. */
+          /* Re-arm the idle clock for the next window; the unanswered cap above keeps
+             a still-quiet tab from looping forever. */
           lastActivityRef.current = Date.now()
           proactiveBusyRef.current = false
         })
@@ -1397,16 +1560,70 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   function startNewChat() {
     setConversationId(null)
     setMessages([])
+    setReplyTarget(null)
+    focusComposerRef.current = true
     setActiveView('Chat')
     lastActivityRef.current = Date.now()
     proactiveBusyRef.current = false
+    proactiveNudgesRef.current = 0
     setNotice('New chat ready.')
   }
 
-  function persistVoicePrefs(next) {
-    setVoicePrefs(next)
-    try { localStorage.setItem(VOICE_PREFS_KEY, JSON.stringify({ voice: next.voice, language: next.language, assistantName: next.assistantName, persona: next.persona, gender: next.gender })) } catch { /* private mode */ }
+  /* A starter from the quick-actions panel never fires at her on its own: a prompt
+     ending in a colon is half a thought ("Brainstorm ideas for:"), so it lands in
+     the composer with the caret at the end, ready to be finished. */
+  function fillComposer(text) {
+    setActiveView('Chat')
+    setPrompt(text)
+    requestAnimationFrame(() => {
+      const el = promptInputRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(el.value.length, el.value.length)
+    })
   }
+
+  /* "Talk call": the dial pad only lives over the chat screen, so from any other
+     view a call means a clean thread first — an old conversation is never dragged
+     into a new call. Already on the chat screen, the current thread is kept. */
+  function startTalkCall() {
+    if (view !== 'Chat') startNewChat()
+    setVoiceOpen(true)
+  }
+
+  function persistVoicePrefs(next) {
+    const payload = voicePrefsPayload(next)
+    setLocalPrefs(payload)
+    try { localStorage.setItem(VOICE_PREFS_KEY, JSON.stringify(payload)) } catch { /* private mode */ }
+    /* Mirror the choice onto the account too. Every consumer — chat, proactive
+       nudge, Talk, the particle face — reads `language` from here, so a setting
+       that only lives in one browser tab is a setting that will be lost. */
+    if (!isLoggedIn || !authToken) return
+    updateProfile(authToken, { prefs: payload })
+      .then((res) => onProfileUpdate(res.user))
+      .catch(() => { /* the local copy stands; the next edit retries */ })
+  }
+
+  /* First run after onboarding (or after prefs shipped): the account may never have
+     been told anything, so offer up what this browser knows — but ASK FIRST. The
+     cached profile is per-origin and can predate a choice made elsewhere, and
+     writing over a saved "Urdu first" with this tab's defaults is exactly the bug
+     this feature exists to kill. */
+  const prefsPushedRef = useRef(null)
+  useEffect(() => {
+    if (!isLoggedIn || !authToken || !userProfile?.id) return
+    if (Object.keys(userProfile.prefs || {}).length) return
+    if (prefsPushedRef.current === userProfile.id) return
+    prefsPushedRef.current = userProfile.id
+    const payload = voicePrefsPayload(voicePrefs)
+    me(authToken)
+      .then((res) => {
+        const saved = res.user?.prefs
+        if (saved && Object.keys(saved).length) return onProfileUpdate(res.user)
+        return updateProfile(authToken, { prefs: payload }).then((r) => onProfileUpdate(r.user))
+      })
+      .catch(() => { /* offline — the next change tries again */ })
+  }, [isLoggedIn, authToken, userProfile, voicePrefs, onProfileUpdate])
 
   const refreshMemories = useCallback(() => {
     if (!isLoggedIn || !authToken) return
@@ -1418,36 +1635,111 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
   }, [isLoggedIn, authToken])
 
   useEffect(() => {
-    if (activeView !== 'Memory' || !isLoggedIn || !authToken) return undefined
+    if (view !== 'Memory' || !isLoggedIn || !authToken) return undefined
     /* defer one tick: the fetch (and its loading state) starts outside the effect body */
     const id = setTimeout(refreshMemories, 0)
     return () => clearTimeout(id)
-  }, [activeView, isLoggedIn, authToken, refreshMemories])
+  }, [view, isLoggedIn, authToken, refreshMemories])
 
   const refreshConversations = useCallback(() => {
     if (!isLoggedIn || !authToken) return
     setConvLoading(true)
     listConversations(authToken)
       .then((r) => setConversations(r.data || []))
-      .catch(() => setNotice('Could not load history — is the backend running on :8787?'))
+      .catch(() => setNotice('Could not load your conversations — is the backend running on :8787?'))
       .finally(() => setConvLoading(false))
   }, [isLoggedIn, authToken])
 
   useEffect(() => {
-    if (activeView !== 'History' || !isLoggedIn || !authToken) return undefined
+    if (view !== 'Memory' || !isLoggedIn || !authToken) return undefined
     const id = setTimeout(() => { setConfirmDeleteAll(false); refreshConversations() }, 0)
     return () => clearTimeout(id)
-  }, [activeView, isLoggedIn, authToken, refreshConversations])
+  }, [view, isLoggedIn, authToken, refreshConversations])
+
+  /* Schedule: the fetch stamps each task's phase while the data lands — a
+     render-time Date.now() would break oxlint purity, so the clock read lives
+     in the callback, exactly once per refresh. */
+  const refreshTasks = useCallback(() => {
+    if (!isLoggedIn || !authToken) return
+    listSchedule(authToken)
+      .then((r) => {
+        const nowMs = Date.now()
+        setTasks((r.data || []).map((t) => ({
+          ...t,
+          phase: t.status === 'done' ? 'done'
+            : Date.parse(t.dueAt) <= nowMs ? 'due'
+            : !t.remindedAt && Date.parse(t.dueAt) - nowMs <= 86400000 ? 'soon'
+            : 'planned',
+        })))
+      })
+      .catch(() => setNotice('Could not load your schedule — is the backend running on :8787?'))
+  }, [isLoggedIn, authToken])
+
+  useEffect(() => {
+    if (activeView !== 'Schedule' || !isLoggedIn || !authToken) return undefined
+    const id = setTimeout(refreshTasks, 0)
+    return () => clearTimeout(id)
+  }, [activeView, isLoggedIn, authToken, refreshTasks])
+
+  /* One nudge per sign-in: ask what needs saying RIGHT NOW — tomorrow's tasks
+     get the day-before heads-up with advice, past-due ones the day-of push.
+     Shown = acked immediately, so a reload can never re-bill the same reminder. */
+  const reminderPulledRef = useRef(false)
+  useEffect(() => {
+    if (!isLoggedIn || !authToken) { reminderPulledRef.current = false; return }
+    if (reminderPulledRef.current) return
+    reminderPulledRef.current = true
+    fetchScheduleReminders(authToken, { assistantName: aiName, persona: voicePrefs.persona, gender: voicePrefs.gender, language: voicePrefs.language })
+      .then((r) => {
+        if (!r?.content) return
+        const ids = [...(r.due || []), ...(r.upcoming || [])]
+        setScheduleReminder({ content: r.content, ids })
+        if (r.user) onProfileUpdate(r.user)
+        ackScheduleReminders(authToken, ids).catch(() => { /* best-effort */ })
+      })
+      .catch(() => { /* reminders are best-effort — they never block the workspace */ })
+  }, [isLoggedIn, authToken, aiName, voicePrefs, onProfileUpdate])
+
+  function addScheduleTask(event) {
+    event.preventDefault()
+    if (!isLoggedIn || !authToken) { onLogin(); return }
+    const title = taskDraft.title.trim()
+    if (!title || !taskDraft.dueAt) return
+    setTaskBusy(true)
+    createScheduleTask(authToken, { title, notes: taskDraft.notes.trim(), dueAt: new Date(taskDraft.dueAt).toISOString() })
+      .then(() => {
+        setTaskDraft({ title: '', dueAt: '', notes: '' })
+        refreshTasks()
+        setNotice(`Scheduled “${title}” — ${aiName} will bring it up a day before and again when it is due.`)
+      })
+      .catch((err) => setNotice(err.message || 'Could not save that task.'))
+      .finally(() => setTaskBusy(false))
+  }
+
+  function toggleScheduleTask(task) {
+    updateScheduleTask(authToken, task.id, { status: task.status === 'done' ? 'open' : 'done' })
+      .then(refreshTasks)
+      .catch((err) => setNotice(err.message || 'Could not update that task.'))
+  }
+
+  function removeScheduleTask(id) {
+    deleteScheduleTask(authToken, id)
+      .then(() => { refreshTasks(); setScheduleReminder((r) => (r && r.ids.includes(id) ? null : r)) })
+      .catch((err) => setNotice(err.message || 'Could not delete that task.'))
+  }
 
   /* Open a saved thread in the main chat panel — voice and text share the same shape */
   function openConversation(id) {
     getConversation(authToken, id)
       .then((convo) => {
         setConversationId(convo.id)
-        setMessages((convo.messages || []).map((m) => ({ id: m.id, role: m.role, content: m.content, images: m.images?.length ? m.images : undefined, ts: m.createdAt ? new Date(m.createdAt).getTime() : null })))
+        setMessages((convo.messages || []).map((m) => ({ id: m.id, role: m.role, content: m.content, images: m.images?.length ? m.images : undefined, replyTo: m.replyTo || undefined, ts: m.createdAt ? new Date(m.createdAt).getTime() : null })))
+        setReplyTarget(null)
+        focusComposerRef.current = true
         setActiveView('Chat')
         lastActivityRef.current = Date.now()
         proactiveBusyRef.current = false
+        proactiveNudgesRef.current = 0
         setNotice(`Opened “${convo.title}”.`)
       })
       .catch((err) => setNotice(err.message || 'Could not open that conversation.'))
@@ -1490,7 +1782,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
           return [{ ...saved, source: 'user' }, ...rest]
         })
         setMemDraft({ key: '', value: '', editingId: null })
-        setNotice(memDraft.editingId ? 'Memory updated.' : 'Aira will remember this.')
+        setNotice(memDraft.editingId ? 'Memory updated.' : `${aiName} will remember this.`)
       })
       .catch((err) => setNotice(err.message || 'Could not save memory.'))
       .finally(() => setMemBusy(false))
@@ -1550,6 +1842,20 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     return () => document.removeEventListener('paste', onPaste)
   }, [view])
 
+  /* Hand the caret back to the composer whenever it was asked for. Skipped when the
+     user is already typing in another field — clicking into the Memory search box
+     must not have its caret stolen mid-word. */
+  useEffect(() => {
+    if (!focusComposerRef.current || view !== 'Chat') return
+    const el = promptInputRef.current
+    if (!el) return /* composer not mounted yet; the next change retries */
+    const active = document.activeElement
+    const typingElsewhere = active instanceof HTMLElement && active !== el
+      && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable)
+    focusComposerRef.current = false
+    if (!typingElsewhere) el.focus()
+  }, [view, messages, streaming])
+
   async function sendPrompt(event, overrideText) {
     if (event) event.preventDefault()
     const cleanPrompt = (typeof overrideText === 'string' ? overrideText : prompt).trim()
@@ -1575,20 +1881,33 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     }
     lastActivityRef.current = Date.now()
     proactiveBusyRef.current = false
+    proactiveNudgesRef.current = 0
+    /* The draft was just sent, not taken back: clear the composer state so the
+       setPrompt('') below can't read as the user withdrawing their words. */
+    typedDraftRef.current = false
+    draftWithdrawnRef.current = false
     setPrompt('')
     setPendingImgs([])
     attachCountRef.current = 0
+    focusComposerRef.current = true
+    /* A pinned reply targets exactly one turn: grab it, drop the chip, and stamp the
+       new user message so the quote renders inside its bubble. */
+    const reply = replyTarget
+    setReplyTarget(null)
     const tempUserId = `local_user_${Date.now()}`
     const tempAsstId = `local_asst_${Date.now()}`
     setMessages((prev) => [
       ...prev,
-      { id: tempUserId, role: 'user', content: cleanPrompt, images: imgUrls.length ? imgUrls : undefined, ts: Date.now() },
+      { id: tempUserId, role: 'user', content: cleanPrompt, images: imgUrls.length ? imgUrls : undefined, replyTo: reply?.id, ts: Date.now() },
       { id: tempAsstId, role: 'assistant', content: '', streaming: true, ts: Date.now() },
     ])
     setStreaming(true)
 
     const controller = new AbortController()
     streamAbortRef.current = controller
+    /* Kept out of state so the screenshot step below already has the stored id of the
+       turn it is about to attach pictures to. */
+    let assistantServerId = null
 
     try {
       const result = await streamChat({
@@ -1596,8 +1915,11 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         message: cleanPrompt,
         assistantName: aiName,
         persona: voicePrefs.persona,
+        gender: voicePrefs.gender,
         language: voicePrefs.language,
         images: imgUrls.length ? imgUrls : undefined,
+        replyTo: reply && String(reply.id).startsWith('msg_') ? reply.id : undefined,
+        replyToText: reply?.content,
         conversationId,
         signal: controller.signal,
         onDelta: (_chunk, fullText) => {
@@ -1607,6 +1929,13 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         },
         onMeta: (meta) => {
           if (meta.conversationId) setConversationId(meta.conversationId)
+          /* The bubble keeps its local key (no remount, no replayed entrance animation);
+             the stored msg_ id rides along as serverId so replying to a live answer
+             links a real message that survives a reload. */
+          if (meta.assistantMessageId) {
+            assistantServerId = meta.assistantMessageId
+            setMessages((prev) => prev.map((m) => (m.id === tempAsstId ? { ...m, serverId: meta.assistantMessageId } : m)))
+          }
         },
       })
 
@@ -1619,6 +1948,15 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         ),
       )
       setNotice(controller.signal.aborted ? `${aiName} stopped.` : `${aiName} replied.`)
+      /* She asked to be seen — so actually be seen: photograph the live app and hang
+         the real shots on this turn instead of leaving a marker on screen. */
+      await fulfilSelfScreenshots({
+        tempId: tempAsstId,
+        text: result.fullText,
+        userText: cleanPrompt,
+        conversationId: result.conversationId,
+        serverId: assistantServerId,
+      })
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) =>
@@ -1641,6 +1979,84 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     streamAbortRef.current?.abort()
   }
 
+  /* "Reply" on an AI bubble: pin that one turn as the target and hand focus to the
+     composer, so the next message answers it specifically instead of the whole thread.
+     serverId is preferred — it is the id the backend actually stored. */
+  function startReply(message) {
+    setReplyTarget({ id: message.serverId || message.id, content: withoutShotMarkers(message.content) })
+    promptInputRef.current?.focus()
+  }
+
+  /* One self-screenshot. Her face is rendered off-screen for the shot (no face is
+     mounted once a thread is open); every other target needs the real page, so open
+     it, wait out the entrance transform, photograph it, then put the user back. */
+  async function takeSelfShot(target) {
+    const spec = SHOT_TARGETS[target] || SHOT_TARGETS.screen
+    if (spec.face) return captureSelfFace({ shape: voicePrefs.gender === 'male' ? 'male' : 'female' })
+    const previous = view
+    if (spec.view && spec.view !== previous) {
+      setActiveView(spec.view)
+      await new Promise((resolve) => setTimeout(resolve, 700))
+    }
+    try {
+      return spec.full
+        ? await captureNode(document.getElementById('workspace'))
+        : await captureCurrentPage()
+    } finally {
+      if (spec.view && spec.view !== previous) {
+        setActiveView(previous)
+        /* The thread remounts at scrollTop 0, so walk back down to the live turn. */
+        await new Promise((resolve) => setTimeout(resolve, 80))
+        chatEndRef.current?.scrollIntoView({ block: 'end' })
+      }
+    }
+  }
+
+  /* Fulfil [SCREENSHOT:…]: capture it for real → upload it → show it in the bubble →
+     tell the backend, so the same picture is still there after a reload. A user who
+     asks to see her face gets it even when the model forgot the marker and only
+     described one, which is exactly the failure this replaces. */
+  async function fulfilSelfScreenshots({ tempId, text, userText, conversationId, serverId }) {
+    const marked = [...new Set([...String(text || '').matchAll(/\[SCREENSHOT:([a-z]+)\]/gi)]
+      .map((m) => m[1].toLowerCase())
+      .filter((target) => SHOT_TARGETS[target]))]
+    const askedForSelf = SELF_OWNER_RE.test(userText || '') && SELF_UI_RE.test(userText || '')
+    const wanted = marked.length ? marked : askedForSelf ? selfUiTargets(userText) : []
+    if (!wanted.length) return
+    setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, shooting: true } : m)))
+    const shots = []
+    const done = []
+    for (const target of wanted.slice(0, 3)) {
+      try {
+        const uploaded = await uploadChatImage(authToken, await takeSelfShot(target))
+        if (uploaded?.url) { shots.push(uploaded.url); done.push(target) }
+      } catch (err) {
+        setNotice(err.message || 'Could not take that screenshot.')
+      }
+    }
+    const markers = done.map((target) => `[SCREENSHOT:${target}]`)
+    setMessages((prev) => prev.map((m) => {
+      if (m.id !== tempId) return m
+      /* Land the reply on exactly the text the server ends up storing: append only the
+         markers she did not write herself, so a fallback capture gets its caption chip
+         too and a marker that was already there is never shown twice. */
+      const missing = markers.filter((marker) => !String(m.content || '').includes(marker))
+      return {
+        ...m,
+        shooting: false,
+        images: shots.length ? shots : undefined,
+        content: missing.length ? `${m.content}\n\n${missing.join('\n\n')}` : m.content,
+      }
+    }))
+    if (!shots.length || !conversationId || !serverId) return
+    /* Live shot already on screen; a failed save costs persistence, never the reply. */
+    try {
+      await attachMessageImages(authToken, conversationId, serverId, shots, markers)
+    } catch {
+      setNotice('Screenshot shown — but it will not be in this thread after a reload.')
+    }
+  }
+
   return <main className="workspace-shell" id="workspace">
     {/* The floating account dock is gone — the account drawer now drops down from
         the topbar profile button, so the workspace owns the full viewport. */}
@@ -1648,9 +2064,9 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       <header className="workspace-topbar">
         <Brand compact />
         {/* Primary workspace nav. The bottom mobile-workspace-nav is display:none and
-           the old dock was removed (its Memory/Settings live in the account drawer),
-           so Chat/History/Tools are otherwise unreachable — expose them here. */}
-        <nav className="workspace-nav" aria-label="Workspace navigation">{['Chat', 'History', 'Tools', 'Desktop'].map((label) => <button type="button" key={label} className={`workspace-nav-btn${view === label ? ' selected' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => setActiveView(label)}>{label}</button>)}</nav>
+           the old dock was removed (Settings lives in the account drawer), so
+           Chat/Schedule/Memory/Tools are otherwise unreachable — expose them here. */}
+        <nav className="workspace-nav" aria-label="Workspace navigation">{['Chat', 'Schedule', 'Memory', 'Tools', 'Desktop'].map((label) => <button type="button" key={label} className={`workspace-nav-btn${view === label ? ' selected' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => setActiveView(label)}>{label}</button>)}</nav>
         <div className="workspace-actions">
           <button
             className="header-voice-btn"
@@ -1706,7 +2122,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
                     <strong>{isLoggedIn ? userName : 'Guest User'}</strong>
                     <span>{isLoggedIn ? userEmail : 'Sign in to sync your work'}</span>
                   </div>
-                  <span className="drawer-badge">{isPremium ? 'Plus Pro' : 'Free'}</span>
+                  <span className="drawer-badge">{isPremium ? (userProfile?.plan === 'yearly_pro' ? 'Yearly Pro' : 'Pro') : 'Starter'}</span>
                 </div>
 
                 <button
@@ -1729,7 +2145,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
                     setActiveView('Memory')
                   }}
                 >
-                  <span>◈</span> Memory &amp; Files
+                  <span>◈</span> Memory &amp; chats
                 </button>
 
                 <button
@@ -1762,6 +2178,11 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
         </div>
       </header>
       <div className="workspace-content" key={view}>
+        {scheduleReminder && <div className="reminder-card" role="status">
+          <span className="reminder-icon" aria-hidden="true">⏰</span>
+          <div className="reminder-body"><b>{aiName} · Schedule reminder</b><p>{scheduleReminder.content}</p></div>
+          <button type="button" className="reminder-close" aria-label="Dismiss reminder" onClick={() => setScheduleReminder(null)}>×</button>
+        </div>}
         {view === 'Chat' && <section className={`workspace-page-panel chat-page${messages.length ? ' has-thread' : ''}`}>
           {messages.length === 0 ? (
             <>
@@ -1800,16 +2221,27 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
                      overlap — the old align-self bubbles risked exactly that. */
                   const mine = m.role === 'user'
                   const initial = (mine ? userName : aiName).trim().charAt(0).toUpperCase() || (mine ? 'U' : 'A')
+                  /* The quote is read back from the live thread — reply_to stores only the
+                     id, so the same text is never duplicated in storage or state. A live
+                     bubble is keyed locally, so match its stored id too. */
+                  const quoted = m.replyTo ? messages.find((x) => x.id === m.replyTo || x.serverId === m.replyTo) : null
+                  const quoteText = quoted ? withoutShotMarkers(quoted.content).replace(/\s+/g, ' ') : ''
+                  /* Only a finished, real answer gets a Reply handle — never a thinking
+                     bubble, an error card or the user's own turn. */
+                  const replyable = !mine && !m.streaming && !m.error && Boolean(m.content)
                   return (
                     <div key={m.id} className={`chat-msg${mine ? ' mine' : ''}${m.error ? ' is-error' : ''}`} style={{ '--i': Math.min(i, 12) }}>
                       <span className="chat-msg-avatar" aria-hidden="true">{mine ? initial : '✦'}</span>
                       <div className="chat-msg-main">
                         <span className="chat-msg-name">{mine ? 'You' : aiName}</span>
                         <div className="chat-msg-bubble">
-                          {m.images?.length ? <div className="chat-msg-imgs">{m.images.map((src) => <a key={src} href={resourceUrl(src)} target="_blank" rel="noreferrer"><img src={resourceUrl(src)} alt="Attached reference" loading="lazy" /></a>)}</div> : null}
-                          <div className="chat-text">{renderChatContent(m.content) || (m.streaming ? '…' : '')}{m.streaming ? <span className="chat-cursor">▍</span> : null}</div>
+                          {quoteText ? <div className="chat-msg-quote"><b aria-hidden="true">↩ {mine ? aiName : 'You'}</b>{quoteText.slice(0, 150)}{quoteText.length > 150 ? '…' : ''}</div> : null}
+                          {m.images?.length ? <div className="chat-msg-imgs">{m.images.map((src) => <a key={src} href={resourceUrl(src)} target="_blank" rel="noreferrer"><img src={resourceUrl(src)} alt={mine ? 'Attached reference' : 'Screenshot taken by the app itself'} loading="lazy" /></a>)}</div> : null}
+                          {/* The face shot takes a few seconds to assemble — say so instead of looking stuck. */}
+                          {m.shooting ? <div className="chat-shot-caption is-pending">📸 Taking a real screenshot…</div> : null}
+                          <div className="chat-text">{m.streaming && !m.content ? <span className="chat-thinking"><span className="chat-dots" aria-hidden="true"><i /><i /><i /></span><em>{aiName} is thinking…</em></span> : <>{renderChatContent(m.content)}{m.streaming ? <span className="chat-cursor" aria-hidden="true" /> : null}</>}</div>
                         </div>
-                        {m.ts ? <span className="chat-msg-time">{formatChatTime(m.ts)}</span> : null}
+                        {m.ts || replyable ? <div className="chat-msg-meta">{m.ts ? <span className="chat-msg-time">{formatChatTime(m.ts)}</span> : null}{replyable ? <button type="button" className="chat-msg-reply" aria-label={`Reply to ${aiName}'s message`} onClick={() => startReply(m)}>↩ Reply</button> : null}</div> : null}
                       </div>
                     </div>
                   )
@@ -1819,83 +2251,68 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
               </div>
             </>
           )}
-          {pendingImgs.length > 0 && <div className="prompt-attachments" aria-label="Attached images">
-            {pendingImgs.map((p) => <span key={p.id} className={`prompt-thumb${p.uploading ? ' uploading' : ''}`}>
-              {p.dataUrl ? <img src={p.dataUrl} alt="Attachment preview" /> : <span className="prompt-thumb-wait" aria-hidden="true">…</span>}
-              <button type="button" aria-label="Remove attachment" onClick={() => removePendingImg(p.id)}>×</button>
-            </span>)}
-          </div>}
-          <form className="prompt-box" onSubmit={sendPrompt}>
-            <span className="prompt-box-spark" aria-hidden="true">✦</span>
-            <button type="button" className="prompt-attach" aria-label="Attach image" title="Attach a reference image — or just Ctrl+V a copied one" onClick={() => attachInputRef.current?.click()}>📎</button>
-            <input ref={attachInputRef} className="prompt-file" type="file" accept="image/*" multiple onChange={(event) => { addImageFiles(event.target.files); event.target.value = '' }} />
-            <label className="sr-only" htmlFor="chat-prompt">Type your message</label>
-            <input id="chat-prompt" type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={streaming ? `${aiName} is typing…` : pendingImgs.length ? 'Ask about the image…' : 'Type your message...'} autoComplete="off" disabled={streaming} />
-            <button type="submit" aria-label="Send message" disabled={streaming || pendingImgs.some((p) => p.uploading) || (!prompt.trim() && !pendingImgs.length)}>➤</button>
-                        {streaming && <button type="button" className="chat-stop-btn" aria-label="Stop generating" onClick={stopGeneration}>■ Stop</button>}
+          <form className={`prompt-box${pendingImgs.length ? ' has-attachments' : ''}${replyTarget ? ' has-reply' : ''}`} onSubmit={sendPrompt}>
+            {replyTarget && <div className="prompt-reply">
+              <span className="prompt-reply-mark" aria-hidden="true">↩</span>
+              <div className="prompt-reply-main"><b>{aiName}</b><small>{replyTarget.content.replace(/\s+/g, ' ').trim().slice(0, 150)}{replyTarget.content.length > 150 ? '…' : ''}</small></div>
+              <button type="button" className="prompt-reply-cancel" aria-label="Cancel reply" onClick={() => setReplyTarget(null)}>×</button>
+            </div>}
+            {pendingImgs.length > 0 && <div className="prompt-attachments" aria-label="Attached images">
+              {pendingImgs.map((p) => <span key={p.id} className={`prompt-thumb${p.uploading ? ' uploading' : ''}`}>
+                {p.dataUrl ? <img src={p.dataUrl} alt="Attachment preview" /> : <span className="prompt-thumb-wait" aria-hidden="true">…</span>}
+                <button type="button" aria-label="Remove attachment" onClick={() => removePendingImg(p.id)}>×</button>
+              </span>)}
+            </div>}
+            <div className="prompt-row">
+              <span className="prompt-box-spark" aria-hidden="true">✦</span>
+              <button type="button" className="prompt-attach" aria-label="Attach image" title="Attach a reference image — or just Ctrl+V a copied one" onClick={() => attachInputRef.current?.click()}>📎</button>
+              <input ref={attachInputRef} className="prompt-file" type="file" accept="image/*" multiple onChange={(event) => { addImageFiles(event.target.files); event.target.value = '' }} />
+              <label className="sr-only" htmlFor="chat-prompt">Type your message</label>
+              {/* Never disabled: a greyed-out field blurs itself, which used to force the
+                  user to click back into the composer before typing the next prompt. The
+                  send button and sendPrompt's own guard block a second turn instead. */}
+              <input id="chat-prompt" ref={promptInputRef} type="text" value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape' && replyTarget) setReplyTarget(null) }} placeholder={replyTarget ? `Replying to ${aiName}…` : streaming ? `${aiName} is typing…` : pendingImgs.length ? 'Ask about the image…' : 'Type your message...'} autoComplete="off" />
+              <button type="submit" aria-label="Send message" disabled={streaming || pendingImgs.some((p) => p.uploading) || (!prompt.trim() && !pendingImgs.length)}>➤</button>
+              {streaming && <button type="button" className="chat-stop-btn" aria-label="Stop generating" onClick={stopGeneration}>■ Stop</button>}
+            </div>
           </form>
+          {/* Quick actions / Continue chat. Always open here: nothing on this screen
+              loses space to a docked panel, so it is given no fold handle at all. */}
+          <ChatPop collapsible={false} open={chatOpen} setOpen={setChatOpen} conversations={conversations} onNewChat={startNewChat} onOpenChat={openConversation} onPrompt={fillComposer} onTalk={startTalkCall} />
         </section>}
         {view === 'Tools' && <div className="workspace-page-panel">
           <div className="workspace-tool-grid">{tools.map(([icon, title, description, tint]) => <button className={`workspace-tool tint-${tint} ${selectedTool === title ? 'tool-highlighted' : ''}`} type="button" key={title} onClick={() => { setSelectedTool(title); setNotice(`${title} ready — describe what you need below.`) }}><span className="showcase-icon">{icon}</span><strong>{title}</strong><small>{description}</small><b>{selectedTool === title ? 'Selected ✓' : 'Open tool →'}</b></button>)}</div>
           {selectedEntry && <ToolRunner key={selectedEntry[1]} entry={selectedEntry} token={authToken} aiName={aiName} persona={voicePrefs.persona} isLoggedIn={isLoggedIn} onLogin={onLogin} onCredits={onProfileUpdate} />}
         </div>}
         {view === 'Desktop' && <DesktopView token={authToken} aiName={aiName} isLoggedIn={isLoggedIn} onLogin={onLogin} />}
-        {view === 'History' && <section className="workspace-page-panel history-panel">
-          <div className="settings-icon">⧗</div>
-          <h2>Every chat, text and voice, in one place.</h2>
-          <p>Aira keeps spoken calls in the same thread list as your typed chats. Open one to continue where you left off, or delete it — the transcript goes with it.</p>
-          {!isLoggedIn ? <p className="history-empty">Sign in to see your saved conversations.</p> : <>
-            {conversations.length > 0 && <div className="history-toolbar">
-              <label className="history-search">
-                <span aria-hidden="true">⌕</span>
-                <input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" autoComplete="off" />
-              </label>
-              {confirmDeleteAll ? <div className="history-confirm" role="group" aria-label="Confirm delete all">
-                <span>Delete all {conversations.length}?</span>
-                <button type="button" className="history-confirm-yes" onClick={removeAllConversations}>Yes, delete all</button>
-                <button type="button" className="history-confirm-no" onClick={() => setConfirmDeleteAll(false)}>Cancel</button>
-              </div> : <button type="button" className="history-clear-all" onClick={() => setConfirmDeleteAll(true)}>Delete all</button>}
-            </div>}
-            {convLoading && <p className="history-empty">Loading…</p>}
-            {!convLoading && conversations.length === 0 && <p className="history-empty">Nothing saved yet. Start a chat or a Talk call and it will show up here.</p>}
-            {!convLoading && conversations.length > 0 && visibleConversations.length === 0 && <p className="history-empty">No conversations match “{historyQuery.trim()}”.</p>}
-            <ul className="history-list">{visibleConversations.map((c) => <li key={c.id}>
-              <button type="button" className="history-open" onClick={() => openConversation(c.id)}>
-                <strong>{c.title}</strong>
-                <small>{new Date(c.updatedAt).toLocaleString()} · {c.model || 'chat'}</small>
-              </button>
-              <button type="button" className="history-del" aria-label={`Delete ${c.title}`} onClick={() => removeConversation(c.id)}>×</button>
-            </li>)}</ul>
-          </>}
+        {view === 'Schedule' && <section className="workspace-page-panel history-panel">
+          <div className="settings-icon">⏰</div>
+          <h2>Schedule it once — {aiName} keeps bringing it up.</h2>
+          <p>Give any task a date and time. {aiName} reminds you one day before with practical advice for that exact task, then again the moment it is due — never twice for the same stage.</p>
+          <form className="schedule-form" onSubmit={addScheduleTask}>
+            <input className="settings-input" type="text" required maxLength={200} placeholder="What needs doing? e.g. Submit the electricity bill" value={taskDraft.title} onChange={(event) => setTaskDraft({ ...taskDraft, title: event.target.value })} aria-label="Task title" />
+            <input className="settings-input" type="datetime-local" required value={taskDraft.dueAt} onChange={(event) => setTaskDraft({ ...taskDraft, dueAt: event.target.value })} aria-label="Due date and time" />
+            <input className="settings-input" type="text" maxLength={2000} placeholder="Notes — more detail, better advice (optional)" value={taskDraft.notes} onChange={(event) => setTaskDraft({ ...taskDraft, notes: event.target.value })} aria-label="Task notes" />
+            <button className="settings-save" type="submit" disabled={taskBusy || !taskDraft.title.trim() || !taskDraft.dueAt}>{taskBusy ? 'Scheduling…' : 'Schedule task'}</button>
+          </form>
+          {!isLoggedIn ? <p className="history-empty">Sign in to schedule tasks and get reminders.</p> : tasks.length === 0 ? <p className="history-empty">Nothing scheduled yet. Add your first task above.</p> : <ul className="schedule-list">{tasks.map((t) => <li key={t.id} className={t.status === 'done' ? 'done' : ''}>
+            <button type="button" className="schedule-check" aria-pressed={t.status === 'done'} aria-label={`Toggle done: ${t.title}`} onClick={() => toggleScheduleTask(t)}>{t.status === 'done' ? '✓' : ''}</button>
+            <div className="schedule-main"><strong>{t.title}</strong>{t.notes && <small>{t.notes}</small>}<span className="schedule-due">{new Date(t.dueAt).toLocaleString()}</span></div>
+            <span className={`schedule-chip ${SCHEDULE_CHIP[t.phase][1]}`}>{SCHEDULE_CHIP[t.phase][0]}</span>
+            <button type="button" className="schedule-delete" aria-label={`Delete ${t.title}`} onClick={() => removeScheduleTask(t.id)}>×</button>
+          </li>)}</ul>}
         </section>}
-        {view === 'Memory' && <section className="workspace-page-panel settings-panel">
-          <div className="settings-icon">◈</div>
-          <h2>A little context goes a long way.</h2>
-          <p>Everything {aiName} is allowed to remember lives here — review, edit or delete any of it.</p>
-          <div className="memory-panel">
-            {isLoggedIn ? <>
-              <form className="memory-add" onSubmit={submitMemory}>
-                <input value={memDraft.key} onChange={(event) => setMemDraft((d) => ({ ...d, key: event.target.value }))} placeholder="Topic (e.g. Preferred language)" maxLength={80} />
-                <input value={memDraft.value} onChange={(event) => setMemDraft((d) => ({ ...d, value: event.target.value }))} placeholder="Detail (e.g. Reply in Roman Urdu)" maxLength={2000} />
-                <button className="button" type="submit" disabled={memBusy || !memDraft.key.trim() || !memDraft.value.trim()}>{memDraft.editingId ? 'Save' : 'Add'}</button>
-                {memDraft.editingId && <button className="button button-ghost" type="button" onClick={() => setMemDraft({ key: '', value: '', editingId: null })}>Cancel</button>}
-              </form>
-              {memLoading && <p className="memory-status">Loading memories…</p>}
-              {!memLoading && memories.length === 0 && <p className="memory-status">No memories yet. Add one above, or tell {aiName} during a Talk call — she only stores what you approve here.</p>}
-              <ul className="memory-list">{memories.map((m) => <li key={m.id}>
-                <div className="memory-text"><strong>{m.key}</strong><span>{m.value}</span></div>
-                <div className="memory-ops">
-                  <button type="button" onClick={() => setMemDraft({ key: m.key, value: m.value, editingId: m.id })}>Edit</button>
-                  <button type="button" className="memory-danger" onClick={() => removeMemoryEntry(m.id)}>Delete</button>
-                </div>
-              </li>)}</ul>
-            </> : <p className="memory-status">Sign in to let {aiName} remember things for you.</p>}
-          </div>
-          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '16px' }}>
-            {!isLoggedIn && <button className="button button-outline" type="button" onClick={onLogin}>Sign in to personalize</button>}
-            {isLoggedIn && <button className="button button-ghost" style={{ borderColor: 'rgba(255, 99, 132, 0.4)', color: '#ff7b92' }} type="button" onClick={onLogout}>Sign Out</button>}
-          </div>
-        </section>}
+        {/* The vault owns this page: the closed door, the light, the particle brain.
+            All the state stays here — the ledger the vault opens still reads and
+            writes these same lists — so it arrives as grouped props objects. */}
+        {view === 'Memory' && <Suspense fallback={<p className="history-empty">Opening the vault…</p>}><MemoryVault
+          aiName={aiName}
+          isLoggedIn={isLoggedIn}
+          authToken={authToken}
+          facts={{ items: memories, loading: memLoading, busy: memBusy, draft: memDraft, setDraft: setMemDraft, submit: submitMemory, remove: removeMemoryEntry }}
+          chats={{ items: conversations, visible: visibleConversations, loading: convLoading, query: historyQuery, setQuery: setHistoryQuery, confirming: confirmDeleteAll, setConfirming: setConfirmDeleteAll, removeAll: removeAllConversations, open: openConversation, remove: removeConversation }}
+          quick={{ open: chatOpen, setOpen: setChatOpen, newChat: startNewChat, prompt: fillComposer, talk: startTalkCall }}
+        /></Suspense>}
         {view === 'Settings' && <SettingsView isLoggedIn={isLoggedIn} userProfile={userProfile} authToken={authToken} onProfileUpdate={onProfileUpdate} onLogin={onLogin} onUpgrade={onUpgrade} voicePrefs={voicePrefs} persistVoicePrefs={persistVoicePrefs} />}
         {notice && <div className="toast-message" role="status"><span>✦</span>{notice}<button type="button" aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div>}
       </div>

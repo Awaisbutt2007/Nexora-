@@ -16,7 +16,10 @@ function titleFromPrompt(text) {
 router.get('/', (req, res) => {
   const rows = getDb()
     .prepare(
-      `SELECT id, title, model, created_at AS createdAt, updated_at AS updatedAt
+      /* `model` is deliberately not selected: the engine id stays in the DB for our own
+         debugging and never travels to the browser, where it would answer the very
+         question the companion is built to keep private — "how were you made?". */
+      `SELECT id, title, created_at AS createdAt, updated_at AS updatedAt
        FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 100`,
     )
     .all(req.user.id)
@@ -28,7 +31,6 @@ router.post('/', (req, res, next) => {
   try {
     const schema = z.object({
       title: z.string().trim().max(120).optional(),
-      model: z.string().trim().max(80).optional(),
     })
     const body = schema.parse(req.body || {})
     const id = `conv_${nanoid(16)}`
@@ -39,12 +41,13 @@ router.post('/', (req, res, next) => {
         `INSERT INTO conversations (id, user_id, title, model, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, req.user.id, body.title || 'New chat', body.model || null, stamp, stamp)
+      /* The engine id is written by the chat path itself; a client-provided one used to
+         be stored here, which only gave the plumbing another way to travel. */
+      .run(id, req.user.id, body.title || 'New chat', null, stamp, stamp)
 
     res.status(201).json({
       id,
       title: body.title || 'New chat',
-      model: body.model || null,
       createdAt: stamp,
       updatedAt: stamp,
       messages: [],
@@ -58,7 +61,7 @@ router.get('/:id', (req, res) => {
   const db = getDb()
   const conversation = db
     .prepare(
-      `SELECT id, title, model, created_at AS createdAt, updated_at AS updatedAt
+      `SELECT id, title, created_at AS createdAt, updated_at AS updatedAt
        FROM conversations WHERE id = ? AND user_id = ?`,
     )
     .get(req.params.id, req.user.id)
@@ -69,7 +72,7 @@ router.get('/:id', (req, res) => {
 
   const rows = db
     .prepare(
-      `SELECT id, role, content, tokens, created_at AS createdAt, images_json
+      `SELECT id, role, content, tokens, created_at AS createdAt, images_json, reply_to AS replyTo
        FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`,
     )
     .all(conversation.id)
@@ -96,6 +99,50 @@ router.patch('/:id', (req, res, next) => {
     const stamp = nowIso()
     db.prepare('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?').run(body.title, stamp, req.params.id)
     res.json({ id: req.params.id, title: body.title, updatedAt: stamp })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* Self-screenshots: when the assistant photographs her own live UI, the client
+   uploads the PNG through POST /api/chat/images (same as any reference picture) and
+   then hangs the resulting path on the assistant turn, so the shot survives a reload
+   instead of being a one-frame trick. Only a real /uploads/img_* path is accepted —
+   the same shape the chat schema allows — and only onto an assistant message. */
+const attachSchema = z.object({
+  images: z.array(z.string().trim().regex(/^\/uploads\/img_[\w.-]+$/)).min(1).max(4),
+  /* The marker lines that were actually fulfilled. Small model, big appetite for
+     forgetting instructions — the app captures anyway, and appending the marker here
+     is what makes the "📸 a real screenshot of my settings" caption render identically
+     live and after a reload. Nothing but the marker shape can be written. */
+  markers: z.array(z.string().trim().regex(/^\[SCREENSHOT:[a-z]{3,16}\]$/i)).max(4).optional(),
+})
+
+router.patch('/:id/messages/:messageId', (req, res, next) => {
+  try {
+    const body = attachSchema.parse(req.body)
+    const db = getDb()
+    const thread = db.prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id)
+    if (!thread) {
+      return res.status(404).json({ error: { message: 'Conversation not found', type: 'not_found' } })
+    }
+    const message = db.prepare('SELECT id, role, content FROM messages WHERE id = ? AND conversation_id = ?').get(req.params.messageId, thread.id)
+    if (!message) {
+      return res.status(404).json({ error: { message: 'Message not found', type: 'not_found' } })
+    }
+    if (message.role !== 'assistant') {
+      return res.status(400).json({ error: { message: 'Only an assistant message can carry screenshots', type: 'invalid_request_error' } })
+    }
+
+    const stamp = nowIso()
+    db.prepare('UPDATE messages SET images_json = ? WHERE id = ?').run(JSON.stringify(body.images), message.id)
+    /* Idempotent: a marker the model already wrote is never duplicated. */
+    const missing = [...new Set(body.markers || [])].filter((marker) => !String(message.content || '').includes(marker))
+    if (missing.length) {
+      db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(`${message.content}\n\n${missing.join('\n\n')}`, message.id)
+    }
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(stamp, thread.id)
+    res.json({ id: message.id, images: body.images, markers: missing, updatedAt: stamp })
   } catch (err) {
     next(err)
   }

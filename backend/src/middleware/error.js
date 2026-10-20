@@ -1,3 +1,5 @@
+import { safeProviderMessage } from '../services/providerErrors.js'
+
 export function notFound(_req, res) {
   res.status(404).json({ error: { message: 'Not found', type: 'not_found' } })
 }
@@ -21,7 +23,9 @@ export function errorHandler(err, _req, res, _next) {
   const exposeMessage = status < 500 || process.env.NODE_ENV !== 'production'
   res.status(status).json({
     error: {
-      message: exposeMessage ? err.message || 'Request failed' : 'Internal server error',
+      /* Even a 4xx can be the provider's own text, which names the model, the
+         vendor and the billing URL — scrub it, keep the status honest. */
+      message: exposeMessage ? safeProviderMessage(err, 'Request failed') : 'Internal server error',
       type: err.type || 'server_error',
     },
   })

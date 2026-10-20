@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { PLANS } from '../config.js'
+import { PLANS, REPLY_LANGUAGES } from '../config.js'
 import { getDb, nowIso } from '../db/index.js'
 import { requireAuth, sanitizeUser } from '../middleware/auth.js'
 import { upgradePlan } from '../services/credits.js'
@@ -12,11 +12,24 @@ router.get('/profile', (req, res) => {
   res.json({ user: req.user, plans: Object.values(PLANS) })
 })
 
+/* The companion choices the workspace sends up whenever one of them changes. Keys
+   are merged, so a client that only knows the language never blanks the persona. */
+const prefsSchema = z
+  .object({
+    voice: z.string().trim().max(20).optional(),
+    language: z.enum(REPLY_LANGUAGES).optional(),
+    assistantName: z.string().trim().min(1).max(40).optional(),
+    persona: z.string().trim().max(400).optional(),
+    gender: z.enum(['female', 'male']).optional(),
+  })
+  .strict()
+
 router.patch('/profile', (req, res, next) => {
   try {
     const schema = z.object({
       name: z.string().trim().min(2).max(80).optional(),
       phone: z.string().trim().max(32).optional().nullable(),
+      prefs: prefsSchema.optional(),
     })
     const body = schema.parse(req.body)
     const db = getDb()
@@ -27,6 +40,10 @@ router.patch('/profile', (req, res, next) => {
     }
     if (body.phone !== undefined) {
       db.prepare('UPDATE users SET phone = ?, updated_at = ? WHERE id = ?').run(body.phone, stamp, req.user.id)
+    }
+    if (body.prefs) {
+      const prefs = { ...req.user.prefs, ...body.prefs }
+      db.prepare('UPDATE users SET prefs_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(prefs), stamp, req.user.id)
     }
 
     const row = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)

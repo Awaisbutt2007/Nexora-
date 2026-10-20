@@ -445,6 +445,11 @@
   background: rgba(114, 226, 255, 0.05);
 }
 
+/* Built-in character rows: the whole row is the click target, not just the play circle */
+.char-list li.pickable {
+  cursor: pointer;
+}
+
 .char-list li.picked {
   background: rgba(114, 226, 255, 0.09);
   box-shadow: inset 3px 0 0 #72e2ff;
