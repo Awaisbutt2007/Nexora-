@@ -21,11 +21,20 @@ export function errorHandler(err, _req, res, _next) {
 
   const status = err.status || err.statusCode || 500
   const exposeMessage = status < 500 || process.env.NODE_ENV !== 'production'
+  /* An explicitly-authored `clientMessage` is vendor-free by construction (still guarded
+     against leaks) and is meant for the user even on a 5xx — e.g. "voice isn't configured
+     on this server" beats the useless "Internal server error". Everything else keeps the
+     hide-internal-5xx-in-production rule. */
+  const message = err.clientMessage != null
+    ? safeProviderMessage(err.clientMessage, 'Something went wrong on our side — please try that once more.')
+    : exposeMessage
+      ? safeProviderMessage(err, 'Request failed')
+      : 'Internal server error'
   res.status(status).json({
     error: {
       /* Even a 4xx can be the provider's own text, which names the model, the
          vendor and the billing URL — scrub it, keep the status honest. */
-      message: exposeMessage ? safeProviderMessage(err, 'Request failed') : 'Internal server error',
+      message,
       type: err.type || 'server_error',
     },
   })

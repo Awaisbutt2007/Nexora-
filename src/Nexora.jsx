@@ -1656,6 +1656,34 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
     return () => clearTimeout(id)
   }, [view, isLoggedIn, authToken, refreshConversations])
 
+  /* The Chat surface's "Recent chats" panel and "Continue chat" chips read
+     `conversations`, so it must be populated the moment the workspace opens — not
+     only once the Memory view mounts (otherwise it lies "No saved chats yet"
+     while threads exist). One load per auth token; the Memory effect above still
+     refreshes on every door visit. */
+  useEffect(() => {
+    if (!isLoggedIn || !authToken) return undefined
+    const id = setTimeout(() => refreshConversations(), 0)
+    return () => clearTimeout(id)
+  }, [isLoggedIn, authToken, refreshConversations])
+
+  /* The account drawer is a dialog: dismiss it with Escape or a click/tap outside
+     the anchor, like every other popover. The DOM is touched only inside the
+     listener body (oxlint purity-safe) and the listeners remove themselves on
+     close. The toggle button lives inside `.account-anchor`, so its own clicks
+     never trip the outside handler. */
+  useEffect(() => {
+    if (!accountDrawerOpen) return undefined
+    const onKey = (event) => { if (event.key === 'Escape') setAccountDrawerOpen(false) }
+    const onPointerDown = (event) => {
+      const el = event.target instanceof Element ? event.target : null
+      if (el && !el.closest('.account-anchor')) setAccountDrawerOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('pointerdown', onPointerDown) }
+  }, [accountDrawerOpen])
+
   /* Schedule: the fetch stamps each task's phase while the data lands — a
      render-time Date.now() would break oxlint purity, so the clock read lives
      in the callback, exactly once per refresh. */
@@ -1940,6 +1968,9 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
       })
 
       setConversationId(result.conversationId)
+      /* Keep the Chat surface's "Recent chats" panel honest: a thread that was
+         just saved should show up without the user first having to visit Memory. */
+      refreshConversations()
       setMessages((prev) =>
         prev.map((m) =>
           m.id === tempAsstId
@@ -2091,7 +2122,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
                 setNotice('✦ Demo: Pro plan unlocked locally. No payment provider is connected — nothing was actually charged.')
               }}
             >
-              <span>✦</span> Try Pro (demo)
+              <span>✦</span> Upgrade
             </button>
           )}
           <div className="account-anchor">
@@ -2110,7 +2141,7 @@ function Workspace({ activeView, setActiveView, selectedTool, setSelectedTool, i
             >
               <span className="profile-avatar">{userAvatar ? <img src={userAvatar} alt="" className="avatar-img" referrerPolicy="no-referrer" /> : userInitial}</span>
               <span>{isLoggedIn ? userName : 'Log in'}</span>
-              <b className={`chevron-arrow ${accountDrawerOpen ? 'drawer-active' : ''}`}>⌄</b>
+              <b className={`chevron-arrow ${accountDrawerOpen ? 'drawer-active' : ''}`} aria-hidden="true"><svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 6 7.5 9 4.5" /></svg></b>
             </button>
 
             {/* Account drawer — same options that lived in the removed dock */}

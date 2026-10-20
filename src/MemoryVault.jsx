@@ -400,12 +400,14 @@ export default function MemoryVault({ aiName, isLoggedIn, authToken, facts, chat
     const formationStart = formedOnceRef.current ? 0 : FORM_DELAY
     formedOnceRef.current = true
 
-    const clock = new THREE.Clock()
+    /* THREE.Clock is deprecated (logs a console warning on every mount); a plain
+       performance.now() delta gives the same seconds-since-mount for the animation. */
+    const startTime = performance.now()
     const world = new THREE.Vector3()
     const projected = new THREE.Vector3()
     let raf = 0
     const animate = () => {
-      const elapsed = clock.getElapsedTime()
+      const elapsed = (performance.now() - startTime) / 1000
       const formT = Math.min(1, Math.max(0, (elapsed - formationStart) / FORM_SECONDS))
       const ease = 1 - (1 - formT) ** 3
       for (let i = 0; i < PARTICLES; i += 1) {

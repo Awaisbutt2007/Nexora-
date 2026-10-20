@@ -502,7 +502,16 @@ a { color: inherit; text-decoration: none; }
 /* Sidebar Profile & Drawer Container */
 .account-anchor { position: relative; }
 
+/* The chevron is an inline SVG (not a text glyph) precisely because glyphs like
+   ⌄ carry a low ink baseline that flex `align-items:center` cannot lift — the box
+   centres but the arrowhead still reads as dropped below the name. A drawn SVG has
+   no baseline, so centring the box centres the arrow. `line-height:0` collapses the
+   inline box so the 11px mark sits dead on the name's optical middle. */
 .account-button .chevron-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
   transition: transform 0.25s ease;
 }
 

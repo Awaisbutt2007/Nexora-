@@ -104,6 +104,12 @@ export function buildRealtimeSession({ assistantName, userName, voice, language,
 
 /* ---- providers ---- */
 
+/* A 503 voice_unavailable is OUR operational state, not a provider hiccup, so it must
+   reach the user as a clear, honest line instead of the generic "Request failed" the
+   plumbing-scrubber would otherwise leave. The full reason (which key, what to set) stays
+   in err.message for the server log; this vendor-free copy is what the client sees. */
+const VOICE_UNAVAILABLE_CLIENT = "Voice calls aren't available on this server yet — it isn't configured with a live voice provider, so a call can't be connected. Text chat works as usual; the site owner can enable voice by setting up the server's voice provider."
+
 const PROVIDERS = {
   'openai-realtime': {
     /* Mint an ephemeral client secret; the browser uses it to open the WebRTC
@@ -113,6 +119,7 @@ const PROVIDERS = {
         const err = new Error('Voice calls need a real OpenAI API key. Set OPENAI_API_KEY in backend/.env — the app is currently in mock mode and will not fake audio.')
         err.status = 503
         err.type = 'voice_unavailable'
+        err.clientMessage = VOICE_UNAVAILABLE_CLIENT
         throw err
       }
       /* Groq (gsk_ keys / groq.com base) speaks the OpenAI chat format but has NO
@@ -122,6 +129,7 @@ const PROVIDERS = {
         const err = new Error('Voice calls need an OpenAI key (sk-…). The configured key is a Groq key — Groq powers text chat but does not support realtime voice. Add a funded OpenAI key to backend/.env to enable calls.')
         err.status = 503
         err.type = 'voice_unavailable'
+        err.clientMessage = VOICE_UNAVAILABLE_CLIENT
         throw err
       }
       const res = await fetch(`${config.openaiBaseUrl.replace(/\/$/, '')}/realtime/client_secrets`, {

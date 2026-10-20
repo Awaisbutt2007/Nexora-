@@ -1011,9 +1011,11 @@ export default function NanoParticles({ count = 30000, shape = 'orb', photoUrl =
     /* Eased "human" pose so a state change glides instead of snapping */
     const pose = { turn: 0, tilt: 0, lean: 0 }
     let mouthOpen = 0
-    const clock = new THREE.Clock()
+    /* THREE.Clock is deprecated (logs a console warning on every mount); a plain
+       performance.now() delta gives the same seconds-since-mount for the animation. */
+    const startTime = performance.now()
     const animate = () => {
-      const elapsed = clock.getElapsedTime()
+      const elapsed = (performance.now() - startTime) / 1000
       const currentShape = shapeRef.current
       const hasCustom = currentShape === 'custom' && customTargetsRef.current
       const portrait = currentShape === 'female' || currentShape === 'male' || !!hasCustom
