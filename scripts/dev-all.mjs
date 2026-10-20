@@ -1,6 +1,6 @@
 /* Starts the frontend and the backend together with one command, so the app can never be
    open while its API is forgotten — the #1 cause of a mysterious "Failed to fetch".
-   Usage: npm run dev:all     (Ctrl+C closes both) */
+   Usage: npm run dev         (Ctrl+C closes both) */
 import { spawn } from 'node:child_process'
 import net from 'node:net'
 import process from 'node:process'

@@ -7,8 +7,8 @@ an executed deploy — no deployment, publish, or paid usage was performed here
 ## Components & default ports
 | Piece | Dir | Dev port | Run |
 |---|---|---|---|
-| Frontend (Vite) | repo root | 5173 | `npm run dev` |
-| Backend (Express + SQLite) | `backend/` | **8787** | `npm --prefix backend start` (`dev` = watch) |
+| Frontend (Vite) | repo root | 5173 | `npm run dev` (starts with API) |
+| Backend (Express + SQLite) | `backend/` | **8787** | `npm run dev` (starts with frontend) |
 | Desktop agent (optional, local) | `desktop-agent/` | **8799** | `npm --prefix desktop-agent start` — loopback only |
 
 The desktop agent is **optional** and must stay on the same machine as the
@@ -24,8 +24,7 @@ cp .env.example .env                       # frontend: VITE_API_URL, VITE_GOOGLE
 cp backend/.env.example backend/.env       # backend secrets (never committed)
 # (optional) cp desktop-agent/.env.example desktop-agent/.env
 
-npm run dev:api &                          # backend on :8787
-npm run dev                                # frontend on :5173
+npm run dev                                # frontend on :5173 + backend on :8787
 ```
 Mock mode works with **no** provider keys (chat/tools/credits run against a
 deterministic mock). Realtime voice and real model answers need `OPENAI_API_KEY`.

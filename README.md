@@ -6,16 +6,17 @@ React 19 + Vite frontend (`src/`) with an Express 5 + `node:sqlite` API (`backen
 
 ```powershell
 npm install; npm --prefix backend install
-npm run dev:all
+npm run dev
 ```
 
-`dev:all` starts the API on **8787** and Vite on **5173** together, so the page can never
+`dev` starts the API on **8787** and Vite on **5173** together, so the page can never
 be open while its backend is forgotten. Open `http://localhost:5173`. The frontend calls
 relative `/api` URLs that Vite proxies to the API, so a second Vite port (`:5174`), the
 printed LAN address or a phone on the same Wi-Fi all work — no CORS setup, no `VITE_API_URL`.
 Without `OPENAI_API_KEY` in `backend/.env` the API streams mock replies, so every flow is
-demonstrable offline. Individual commands: `npm run dev` (web only), `npm run dev:api`
-(API only), `npm run build`, `npm run lint`, `npm --prefix backend test`.
+demonstrable offline. Individual commands: `npm run dev:web` (web only), `npm run dev:api`
+(API only), `npm run dev:all` (same as `npm run dev`), `npm run build`, `npm run lint`,
+`npm --prefix backend test`.
 
 ### One-process mode
 
